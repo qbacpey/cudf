@@ -26,6 +26,16 @@
 
 enum class data_type : int32_t {
   INTEGRAL        = static_cast<int32_t>(type_group_id::INTEGRAL),
+  INT32           = static_cast<int32_t>(cudf::type_id::INT32),
+  INT64           = static_cast<int32_t>(cudf::type_id::INT64),
+  INT16           = static_cast<int32_t>(cudf::type_id::INT16),
+  INT8            = static_cast<int32_t>(cudf::type_id::INT8),
+  UINT32          = static_cast<int32_t>(cudf::type_id::UINT32),
+  UINT64          = static_cast<int32_t>(cudf::type_id::UINT64),
+  UINT16          = static_cast<int32_t>(cudf::type_id::UINT16),
+  UINT8           = static_cast<int32_t>(cudf::type_id::UINT8),
+  FLOAT32         = static_cast<int32_t>(cudf::type_id::FLOAT32),
+  FLOAT64         = static_cast<int32_t>(cudf::type_id::FLOAT64),
   INTEGRAL_SIGNED = static_cast<int32_t>(type_group_id::INTEGRAL_SIGNED),
   FLOAT           = static_cast<int32_t>(type_group_id::FLOATING_POINT),
   BOOL8           = static_cast<int32_t>(cudf::type_id::BOOL8),
@@ -43,6 +53,16 @@ NVBENCH_DECLARE_ENUM_TYPE_STRINGS(
   [](data_type value) {
     switch (value) {
       case data_type::INTEGRAL: return "INTEGRAL";
+      case data_type::INT32: return "INT32";
+      case data_type::INT64: return "INT64";
+      case data_type::INT16: return "INT16";
+      case data_type::INT8: return "INT8";
+      case data_type::UINT32: return "UINT32";
+      case data_type::UINT64: return "UINT64";
+      case data_type::UINT16: return "UINT16";
+      case data_type::UINT8: return "UINT8";
+      case data_type::FLOAT32: return "FLOAT32";
+      case data_type::FLOAT64: return "FLOAT64";
       case data_type::INTEGRAL_SIGNED: return "INTEGRAL_SIGNED";
       case data_type::FLOAT: return "FLOAT";
       case data_type::BOOL8: return "BOOL8";

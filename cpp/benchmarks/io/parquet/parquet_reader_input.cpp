@@ -24,6 +24,21 @@
 
 #include <nvbench/nvbench.cuh>
 
+cudf::io::column_encoding retrieve_column_encoding_enum(std::string const& encoding_str)
+{
+  if (encoding_str == "PLAIN") { return cudf::io::column_encoding::PLAIN; }
+  if (encoding_str == "DICTIONARY") { return cudf::io::column_encoding::DICTIONARY; }
+  if (encoding_str == "DELTA_BINARY_PACKED") {
+    return cudf::io::column_encoding::DELTA_BINARY_PACKED;
+  }
+  if (encoding_str == "DELTA_LENGTH_BYTE_ARRAY") {
+    return cudf::io::column_encoding::DELTA_LENGTH_BYTE_ARRAY;
+  }
+  if (encoding_str == "DELTA_BYTE_ARRAY") { return cudf::io::column_encoding::DELTA_BYTE_ARRAY; }
+  if (encoding_str == "BYTE_STREAM_SPLIT") { return cudf::io::column_encoding::BYTE_STREAM_SPLIT; }
+  CUDF_FAIL("Unsupported column encoding");
+}
+
 constexpr cudf::size_type num_cols = 64;
 
 void parquet_read_common(cudf::size_type num_rows_to_read,
@@ -398,6 +413,55 @@ void BM_parquet_read_wide_tables_mixed(nvbench::state& state)
   parquet_read_common(num_rows_written, n_col, source_sink, state);
 }
 
+template <data_type DataType>
+void BM_parquet_read_encoding(nvbench::state& state,
+                              nvbench::type_list<nvbench::enum_type<DataType>> type_list)
+{
+  auto const d_type      = get_type_or_group(static_cast<int32_t>(DataType));
+  auto const source_type = retrieve_io_type_enum(state.get_string("io_type"));
+  auto const data_size   = static_cast<size_t>(state.get_int64("data_size"));
+  auto const compression = cudf::io::compression_type::SNAPPY;
+  auto const encoding    = retrieve_column_encoding_enum(state.get_string("encoding"));
+  cuio_source_sink_pair source_sink(source_type);
+  auto const cardinality = static_cast<cudf::size_type>(state.get_int64("cardinality"));
+  auto const run_length  = static_cast<cudf::size_type>(state.get_int64("run_length"));
+
+  auto const num_rows_written = [&]() {
+    auto const tbl = create_random_table(
+      cycle_dtypes(d_type, num_cols),
+      table_size_bytes{data_size},
+      data_profile_builder().cardinality(cardinality).avg_run_length(run_length));
+    auto const view = tbl->view();
+
+    std::vector<std::string> col_names;
+    for (int i = 0; i < view.num_columns(); ++i) {
+      col_names.push_back("col_" + std::to_string(i));
+    }
+
+    cudf::io::table_metadata metadata;
+    std::vector<cudf::io::column_name_info> col_name_infos;
+    for (auto& col_name : col_names) {
+      col_name_infos.push_back(cudf::io::column_name_info(col_name));
+    }
+    metadata.schema_info = col_name_infos;
+
+    cudf::io::table_input_metadata table_metadata(metadata);
+    std::for_each(table_metadata.column_metadata.begin(),
+                  table_metadata.column_metadata.end(),
+                  [=](auto& col_meta) { col_meta.set_encoding(encoding); });
+
+    auto builder = cudf::io::parquet_writer_options::builder(source_sink.make_sink_info(), view);
+    builder.compression(compression);
+    builder.metadata(table_metadata);
+    auto const write_opts = builder.build();
+
+    cudf::io::write_parquet(write_opts);
+    return view.num_rows();
+  }();
+
+  parquet_read_common(num_rows_written, num_cols, source_sink, state);
+}
+
 using d_type_list = nvbench::enum_type_list<data_type::INTEGRAL,
                                             data_type::FLOAT,
                                             data_type::BOOL8,
@@ -490,3 +554,38 @@ NVBENCH_BENCH(BM_parquet_read_long_strings)
   .add_int64_axis("cardinality", {0, 1000})
   .add_int64_power_of_two_axis("avg_string_length",
                                nvbench::range(4, 16, 2));  // 16, 64, ... -> 64k
+
+using d_type_list_integral =
+  nvbench::enum_type_list<data_type::INT64>;
+NVBENCH_BENCH_TYPES(BM_parquet_read_encoding, NVBENCH_TYPE_AXES(d_type_list_integral))
+  .set_name("parquet_read_integral_encoding")
+  .set_type_axes_names({"data_type"})
+  .add_string_axis("io_type", {"DEVICE_BUFFER"})
+  .add_string_axis("encoding", {"PLAIN", "DICTIONARY", "DELTA_BINARY_PACKED", "BYTE_STREAM_SPLIT"})
+  .set_min_samples(4)
+  .add_int64_axis("cardinality", {0, 1000})
+  .add_int64_axis("run_length", {1, 32})
+  .add_int64_axis("data_size", {512 << 20});
+
+using d_type_list_float = nvbench::enum_type_list<data_type::FLOAT>;
+NVBENCH_BENCH_TYPES(BM_parquet_read_encoding, NVBENCH_TYPE_AXES(d_type_list_float))
+  .set_name("parquet_read_float_encoding")
+  .set_type_axes_names({"data_type"})
+  .add_string_axis("io_type", {"DEVICE_BUFFER"})
+  .add_string_axis("encoding", {"PLAIN", "DICTIONARY", "BYTE_STREAM_SPLIT"})
+  .set_min_samples(4)
+  .add_int64_axis("cardinality", {0, 1000})
+  .add_int64_axis("run_length", {1, 32})
+  .add_int64_axis("data_size", {512 << 20});
+
+using d_type_list_string = nvbench::enum_type_list<data_type::STRING>;
+NVBENCH_BENCH_TYPES(BM_parquet_read_encoding, NVBENCH_TYPE_AXES(d_type_list_string))
+  .set_name("parquet_read_string_encoding")
+  .set_type_axes_names({"data_type"})
+  .add_string_axis("io_type", {"FILEPATH", "HOST_BUFFER", "DEVICE_BUFFER"})
+  .add_string_axis("encoding",
+                   {"PLAIN", "DICTIONARY", "DELTA_LENGTH_BYTE_ARRAY", "DELTA_BYTE_ARRAY"})
+  .set_min_samples(4)
+  .add_int64_axis("cardinality", {0, 1000})
+  .add_int64_axis("run_length", {1, 32})
+  .add_int64_axis("data_size", {512 << 20});
