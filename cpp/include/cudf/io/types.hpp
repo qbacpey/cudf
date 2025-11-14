@@ -66,7 +66,10 @@ enum class compression_type : int32_t {
   ZLIB,    ///< ZLIB format, using DEFLATE algorithm
   LZ4,     ///< LZ4 format, using LZ77
   LZO,     ///< Lempel–Ziv–Oberhumer format
-  ZSTD     ///< Zstandard format
+  ZSTD,     ///< Zstandard format
+  CASCADED,  ///< nvcomp, CASCADED format, using multiple algorithms
+  DEFLATE,   ///< nvcomp, DEFLATE format, using DEFLATE algorithm
+  // BITCOMP,   ///< nvcomp, BITCOMP format, using bit compaction
 };
 
 /**

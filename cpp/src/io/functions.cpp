@@ -600,8 +600,9 @@ bool is_supported_read_parquet(compression_type compression)
   }
 
   return ((compression == compression_type::BROTLI or compression == compression_type::GZIP or
-           compression == compression_type::LZ4 or compression == compression_type::SNAPPY or
-           compression == compression_type::ZSTD) and
+           compression == compression_type::LZ4 or compression == compression_type::SNAPPY or 
+           compression == compression_type::CASCADED or compression == compression_type::DEFLATE
+           or compression == compression_type::ZSTD) and
           detail::is_decompression_supported(compression));
 }
 
@@ -612,7 +613,7 @@ bool is_supported_write_parquet(compression_type compression)
   }
 
   return ((compression == compression_type::LZ4 or compression == compression_type::SNAPPY or
-           compression == compression_type::ZSTD) and
+           compression == compression_type::ZSTD or compression == compression_type::CASCADED  or compression == compression_type::DEFLATE) and
           detail::is_compression_supported(compression));
 }
 

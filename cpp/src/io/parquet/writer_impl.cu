@@ -77,6 +77,9 @@ Compression to_parquet_compression(compression_type compression)
     case compression_type::LZ4:
       // Parquet refers to LZ4 as "LZ4_RAW"; Parquet's "LZ4" is not standard LZ4
       return Compression::LZ4_RAW;
+    case compression_type::CASCADED: return Compression::CASCADED;
+    case compression_type::DEFLATE: return Compression::DEFLATE;
+    // case compression_type::BITCOMP: return Compression::BITCOMP;
     case compression_type::NONE: return Compression::UNCOMPRESSED;
     default: CUDF_FAIL("Unsupported compression type");
   }

@@ -499,6 +499,9 @@ void compress(compression_type compression,
     case compression_type::ZSTD:
       return not detail::nvcomp::is_compression_disabled(nvcomp_type.value());
     case compression_type::SNAPPY:
+    case compression_type::CASCADED:
+    case compression_type::DEFLATE:
+    // case compression_type::BITCOMP:
     case compression_type::NONE: return true;
     default: return false;
   }

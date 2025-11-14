@@ -29,9 +29,14 @@
 #include <nvcomp/lz4.h>
 #include <nvcomp/snappy.h>
 #include <nvcomp/zstd.h>
+#include <nvcomp/cascaded.h>
+#include <nvcomp/ans.h>
+#include <nvcomp/bitcomp.h>
+
 
 #include <mutex>
 
+#include <iostream>
 namespace cudf::io::detail::nvcomp {
 namespace {
 
@@ -65,6 +70,8 @@ namespace {
     case compression_type::DEFLATE: return "Deflate";
     case compression_type::LZ4: return "LZ4";
     case compression_type::GZIP: return "GZIP";
+    case compression_type::CASCADED: return "Cascaded";
+    // case compression_type::BITCOMP: return "Bitcomp";
   }
   return "compression_type(" + std::to_string(static_cast<int>(compression)) + ")";
 }
@@ -129,6 +136,20 @@ auto batched_decompress_get_temp_size_async(compression_type compression,
                                                          nvcompBatchedGzipDecompressDefaultOpts,
                                                          temp_bytes,
                                                          max_total_uncompressed_bytes);
+    case compression_type::CASCADED:
+      return nvcompBatchedCascadedDecompressGetTempSizeAsync(
+        num_chunks,
+        max_uncompressed_chunk_bytes,
+        nvcompBatchedCascadedDecompressDefaultOpts,
+        temp_bytes,
+        max_total_uncompressed_bytes);
+    // case compression_type::BITCOMP:
+    //   return nvcompBatchedBitcompDecompressGetTempSizeAsync(
+    //     num_chunks,
+    //     max_uncompressed_chunk_bytes,
+    //     nvcompBatchedBitcompDecompressDefaultOpts,
+    //     temp_bytes,
+    //     max_total_uncompressed_bytes);
     default: UNSUPPORTED_COMPRESSION(compression);
   }
 }
@@ -214,6 +235,38 @@ auto batched_decompress_async(compression_type compression,
                                               nvcompBatchedGzipDecompressDefaultOpts,
                                               device_statuses,
                                               stream.value());
+    case compression_type::CASCADED: {
+      nvcompAlignmentRequirements_t alignments{};
+      nvcompStatus_t status;
+      status = nvcompBatchedCascadedDecompressGetRequiredAlignments(
+        nvcompBatchedCascadedDecompressDefaultOpts, &alignments);
+      CHECK_NVCOMP_STATUS(status);
+      std::cout << "Cascaded decompression alignments - " << std::endl;
+      return nvcompBatchedCascadedDecompressAsync(device_compressed_chunk_ptrs,
+                                                  device_compressed_chunk_bytes,
+                                                  device_uncompressed_buffer_bytes,
+                                                  device_uncompressed_chunk_bytes,
+                                                  num_chunks,
+                                                  device_temp_ptr,
+                                                  temp_bytes,
+                                                  device_uncompressed_chunk_ptrs,
+                                                  nvcompBatchedCascadedDecompressDefaultOpts,
+                                                  device_statuses,
+                                                  stream.value());
+    }
+
+    // case compression_type::BITCOMP:
+    //   return nvcompBatchedBitcompDecompressAsync(device_compressed_chunk_ptrs,
+    //                                              device_compressed_chunk_bytes,
+    //                                              device_uncompressed_buffer_bytes,
+    //                                              device_uncompressed_chunk_bytes,
+    //                                              num_chunks,
+    //                                              device_temp_ptr,
+    //                                              temp_bytes,
+    //                                              device_uncompressed_chunk_ptrs,
+    //                                              nvcompBatchedBitcompDecompressDefaultOpts,
+    //                                              device_statuses,
+    //                                              stream.value());
     default: UNSUPPORTED_COMPRESSION(compression);
   }
 }
@@ -254,6 +307,23 @@ nvcompStatus_t batched_compress_get_temp_size_async(compression_type compression
                                                       temp_size,
                                                       max_total_uncompressed_bytes);
       break;
+    case compression_type::CASCADED: {
+      auto opts = nvcompBatchedCascadedCompressDefaultOpts;
+      // opts.type = NVCOMP_TYPE_LONGLONG;
+      return nvcompBatchedCascadedCompressGetTempSizeAsync(batch_size,
+                                                           max_uncompressed_chunk_bytes,
+                                                           opts,
+                                                           temp_size,
+                                                           max_total_uncompressed_bytes);
+      break;
+    }
+    // case compression_type::BITCOMP:
+    //   return nvcompBatchedBitcompCompressGetTempSizeAsync(batch_size,
+    //                                                        max_uncompressed_chunk_bytes,
+    //                                                        nvcompBatchedBitcompCompressDefaultOpts,
+    //                                                        temp_size,
+    //                                                        max_total_uncompressed_bytes);
+    // break;
     default: UNSUPPORTED_COMPRESSION(compression);
   }
 }
@@ -342,6 +412,36 @@ void batched_compress_async(compression_type compression,
                                                     nvcompBatchedLZ4CompressDefaultOpts,
                                                     device_nvcomp_statuses,
                                                     stream.value());
+    case compression_type::CASCADED: {
+      std::cout << "nvcompBatchedCascadedCompressAsync called" << std::endl;
+      auto opts = nvcompBatchedCascadedCompressDefaultOpts;
+      // opts.type = NVCOMP_TYPE_LONGLONG;
+      nvcomp_status = nvcompBatchedCascadedCompressAsync(device_uncompressed_ptrs,
+                                                         device_uncompressed_bytes,
+                                                         max_uncompressed_chunk_bytes,
+                                                         batch_size,
+                                                         device_temp_ptr,
+                                                         temp_bytes,
+                                                         device_compressed_ptrs,
+                                                         device_compressed_bytes,
+                                                         opts,
+                                                         device_nvcomp_statuses,
+                                                         stream.value());
+      break;
+    }
+    // case compression_type::BITCOMP:
+    //   std::cout << "nvcompBatchedBitcompCompressAsync called" << std::endl;
+    //   nvcomp_status = nvcompBatchedBitcompCompressAsync(device_uncompressed_ptrs,
+    //                                                      device_uncompressed_bytes,
+    //                                                      max_uncompressed_chunk_bytes,
+    //                                                      batch_size,
+    //                                                      device_temp_ptr,
+    //                                                      temp_bytes,
+    //                                                      device_compressed_ptrs,
+    //                                                      device_compressed_bytes,
+    //                                                      nvcompBatchedBitcompCompressDefaultOpts,
+    //                                                      device_nvcomp_statuses,
+    //                                                      stream.value());
       break;
     default: UNSUPPORTED_COMPRESSION(compression);
   }
@@ -361,6 +461,8 @@ std::optional<std::string> is_compression_disabled_impl(compression_type compres
     case compression_type::LZ4:
     case compression_type::SNAPPY:
     case compression_type::ZSTD:
+    case compression_type::CASCADED:
+    // case compression_type::BITCOMP:
       if (not params.are_stable_integrations_enabled) {
         return "nvCOMP use is disabled through the `LIBCUDF_NVCOMP_POLICY` environment variable.";
       }
@@ -383,6 +485,8 @@ std::optional<std::string> is_decompression_disabled_impl(compression_type compr
     case compression_type::DEFLATE:
     case compression_type::LZ4:
     case compression_type::SNAPPY:
+    case compression_type::CASCADED:
+    // case compression_type::BITCOMP:
     case compression_type::ZSTD: {
       if (not params.are_stable_integrations_enabled) {
         return "nvCOMP use is disabled through the `LIBCUDF_NVCOMP_POLICY` environment variable.";
@@ -435,6 +539,26 @@ auto batched_decompress_get_temp_size_sync(compression_type compression,
                                                        nvcompBatchedLZ4DecompressDefaultOpts,
                                                        device_statuses,
                                                        stream);
+    case compression_type::CASCADED:
+      return nvcompBatchedCascadedDecompressGetTempSizeSync(device_compressed_chunk_ptrs,
+                                                            device_compressed_chunk_bytes,
+                                                            num_chunks,
+                                                            max_uncompressed_chunk_bytes,
+                                                            temp_bytes,
+                                                            max_total_uncompressed_bytes,
+                                                            nvcompBatchedCascadedDecompressDefaultOpts,
+                                                            device_statuses,
+                                                            stream);
+    // case compression_type::BITCOMP:
+    //   return nvcompBatchedBitcompDecompressGetTempSizeSync(device_compressed_chunk_ptrs,
+    //                                                         device_compressed_chunk_bytes,
+    //                                                         num_chunks,
+    //                                                         max_uncompressed_chunk_bytes,
+    //                                                         temp_bytes,
+    //                                                         max_total_uncompressed_bytes,
+    //                                                         nvcompBatchedBitcompDecompressDefaultOpts,
+    //                                                         device_statuses,
+    //                                                         stream);
     case compression_type::DEFLATE:
       return nvcompBatchedDeflateDecompressGetTempSizeSync(
         device_compressed_chunk_ptrs,
@@ -469,6 +593,8 @@ size_t batched_decompress_temp_size_ex(compression_type compression,
                                        rmm::cuda_stream_view stream)
 {
   if (is_batched_decompress_temp_size_ex_supported(compression)) {
+    std::cout << "Using batched_decompress_get_temp_size_sync for temp size calculation"
+              << std::endl;
     size_t temp_size = 0;
     auto d_statuses  = rmm::device_uvector<nvcompStatus_t>(input_data_ptrs.size(), stream);
     nvcompStatus_t const nvcomp_status =
@@ -513,7 +639,8 @@ size_t batched_decompress_temp_size(compression_type compression,
 
 bool is_batched_decompress_temp_size_ex_supported(compression_type compression)
 {
-  return compression == compression_type::ZSTD;
+
+  return compression == compression_type::ZSTD or compression == compression_type::CASCADED;
 }
 
 size_t batched_decompress_temp_size_ex(compression_type compression,
@@ -557,6 +684,8 @@ void batched_decompress(compression_type compression,
                                                          max_total_uncomp_size,
                                                          stream);
   rmm::device_buffer scratch(temp_size, stream);
+  std::cout << "Decompression scratch size: " << temp_size << " bytes" << std::endl;
+  CUDF_EXPECTS(is_aligned(scratch.data(), 8), "DeCompression failed, misaligned scratch buffer");
 
   auto const nvcomp_status = batched_decompress_async(compression,
                                                       use_hw_decompression(),
@@ -609,6 +738,17 @@ size_t compress_max_output_chunk_size(compression_type compression,
       status = nvcompBatchedLZ4CompressGetMaxOutputChunkSize(
         capped_uncomp_bytes, nvcompBatchedLZ4CompressDefaultOpts, &max_comp_chunk_size);
       break;
+    case compression_type::CASCADED: {
+      auto opts = nvcompBatchedCascadedCompressDefaultOpts;
+      // opts.type = NVCOMP_TYPE_LONGLONG;
+      status = nvcompBatchedCascadedCompressGetMaxOutputChunkSize(
+        capped_uncomp_bytes, opts, &max_comp_chunk_size);
+      break;
+    }
+    // case compression_type::BITCOMP:
+    //   status = nvcompBatchedBitcompCompressGetMaxOutputChunkSize(
+    //     capped_uncomp_bytes, nvcompBatchedBitcompCompressDefaultOpts, &max_comp_chunk_size);
+    //   break;
     default: UNSUPPORTED_COMPRESSION(compression);
   }
   CHECK_NVCOMP_STATUS(status);
@@ -768,6 +908,16 @@ size_t compress_required_alignment(compression_type compression)
       status = nvcompBatchedLZ4CompressGetRequiredAlignments(nvcompBatchedLZ4CompressDefaultOpts,
                                                              &alignments);
       break;
+    case compression_type::CASCADED: {
+      auto opts = nvcompBatchedCascadedCompressDefaultOpts;
+      // opts.type = NVCOMP_TYPE_LONGLONG;
+      status    = nvcompBatchedCascadedCompressGetRequiredAlignments(opts, &alignments);
+      break;
+    }
+    // case compression_type::BITCOMP:
+    //   status = nvcompBatchedBitcompCompressGetRequiredAlignments(
+    //     nvcompBatchedBitcompCompressDefaultOpts, &alignments);
+    //   break;
     default: UNSUPPORTED_COMPRESSION(compression);
   }
   CHECK_NVCOMP_STATUS(status);
@@ -791,11 +941,23 @@ size_t decompress_required_alignment(compression_type compression)
     case compression_type::ZSTD:
       status = nvcompBatchedZstdDecompressGetRequiredAlignments(
         nvcompBatchedZstdDecompressDefaultOpts, &alignments);
+      std::cout << "ZSTD input alignment: " << alignments.input << ", output alignment: " << alignments.output
+                  << ", temp alignment: " << alignments.temp << std::endl;
       break;
     case compression_type::LZ4:
       status = nvcompBatchedLZ4DecompressGetRequiredAlignments(
         nvcompBatchedLZ4DecompressDefaultOpts, &alignments);
       break;
+    case compression_type::CASCADED:
+      status = nvcompBatchedCascadedDecompressGetRequiredAlignments(
+        nvcompBatchedCascadedDecompressDefaultOpts, &alignments);
+      std::cout << "CASCADED input alignment: " << alignments.input << ", output alignment: " << alignments.output
+                << ", temp alignment: " << alignments.temp << std::endl;
+      break;
+    // case compression_type::BITCOMP:
+    //   status = nvcompBatchedBitcompDecompressGetRequiredAlignments(
+    //     nvcompBatchedBitcompDecompressDefaultOpts, &alignments);
+    //   break;
     default: UNSUPPORTED_COMPRESSION(compression);
   }
   CHECK_NVCOMP_STATUS(status);
@@ -810,6 +972,8 @@ std::optional<size_t> compress_max_allowed_chunk_size(compression_type compressi
     case compression_type::SNAPPY: return nvcompSnappyCompressionMaxAllowedChunkSize;
     case compression_type::ZSTD: return nvcompZstdCompressionMaxAllowedChunkSize;
     case compression_type::LZ4: return nvcompLZ4CompressionMaxAllowedChunkSize;
+    case compression_type::CASCADED: return nvcompCascadedCompressionMaxAllowedChunkSize;
+    // case compression_type::BITCOMP: return nvcompBitcompCompressionMaxAllowedChunkSize;
     default: UNSUPPORTED_COMPRESSION(compression);
   }
 }

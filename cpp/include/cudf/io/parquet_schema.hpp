@@ -118,6 +118,9 @@ enum class Compression : uint8_t {
   LZ4          = 5,  // deprecated; based on LZ4, but with an additional undocumented framing scheme
   ZSTD         = 6,  // Added in 2.3.2
   LZ4_RAW      = 7,  // "standard" LZ4 block format
+  CASCADED     = 8,  // nvcomp, Combination of multiple codecs in a cascaded manner
+  DEFLATE      = 9,  // nvcomp, DEFLATE codec
+  // BITCOMP      = 9,  // nvcomp, Bit compaction codec
 };
 
 /**

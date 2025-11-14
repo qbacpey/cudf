@@ -94,7 +94,7 @@ void print_usage()
                "                  <compression type> <write page stats: yes/no>\n\n"
                "Available encoding types: DEFAULT, DICTIONARY, PLAIN, DELTA_BINARY_PACKED,\n"
                "                 DELTA_LENGTH_BYTE_ARRAY, DELTA_BYTE_ARRAY\n\n"
-               "Available compression types: NONE, AUTO, SNAPPY, LZ4, ZSTD\n\n";
+               "Available compression types: NONE, AUTO, SNAPPY, LZ4, ZSTD, CASCADED, DEFLATE\n\n";
 }
 
 /**

@@ -181,3 +181,10 @@ compile_commands.json
 # pytest artifacts
 rmm_log.txt
 python/cudf/cudf_pandas_tests/data/rmm_log.txt
+cpp/cmake/Modules/JitifyPreprocessKernels.cmake
+cpp/CMakeLists.txt
+qi.lsyncd.lua
+Notes.md
+How-To-Rebase.md
+cpp/cmake/Modules/JitifyPreprocessKernels.cmake
+cpp/cmake/Modules/JitifyPreprocessKernels.cmake

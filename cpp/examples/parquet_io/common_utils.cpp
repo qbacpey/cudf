@@ -76,6 +76,9 @@ cudf::io::compression_type get_compression_type(std::string name)
     {"AUTO", compression_type::AUTO},
     {"SNAPPY", compression_type::SNAPPY},
     {"LZ4", compression_type::LZ4},
+    {"CASCADED", compression_type::CASCADED},
+    {"DEFLATE", compression_type::DEFLATE},
+    // {"BITCOMP", compression_type::BITCOMP},
     {"ZSTD", compression_type::ZSTD}};
 
   std::transform(name.begin(), name.end(), name.begin(), ::toupper);
@@ -83,7 +86,7 @@ cudf::io::compression_type get_compression_type(std::string name)
   throw std::invalid_argument(name +
                               " is not a valid compression type.\n\n"
                               "Available compression types: NONE, AUTO, SNAPPY,\n"
-                              "LZ4, ZSTD\n\n");
+                              "LZ4, ZSTD, CASCADED, BITCOMP\n\n");
 }
 
 bool get_boolean(std::string input)

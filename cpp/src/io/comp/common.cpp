@@ -37,6 +37,9 @@ namespace cudf::io::detail {
     case compression_type::LZ4: return "LZ4";
     case compression_type::LZO: return "LZO";
     case compression_type::ZSTD: return "ZSTD";
+    case compression_type::CASCADED: return "CASCADED";
+    case compression_type::DEFLATE: return "DEFLATE";
+    // case compression_type::BITCOMP: return "BITCOMP";
     default:
       CUDF_FAIL("Invalid compression type: " + std::to_string(static_cast<int>(compression)));
   }

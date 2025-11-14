@@ -39,15 +39,15 @@ constexpr uint8_t fcomment = 0x10;  // Comment present
 };  // namespace GZIPHeaderFlag
 
 // Threshold for buffer count where device compression is favored over host in AUTO mode
-constexpr size_t default_host_compression_auto_threshold = 128;
+constexpr size_t default_host_compression_auto_threshold = 0;
 // Threshold for buffer count where device decompression is favored over host in AUTO mode
-constexpr size_t default_host_decompression_auto_threshold = 128;
+constexpr size_t default_host_decompression_auto_threshold = 0;
 // Estimated ratio between total CPU decompression throughput and decompression throughput of a
 // single GPU block; higher values lead to more host decompression in HYBRID mode
-constexpr double default_host_device_decompression_cost_ratio = 32;
+constexpr double default_host_device_decompression_cost_ratio = 0;
 // Estimated ratio between total CPU compression throughput and compression throughput of a
 // single GPU block; higher values lead to more host compression in HYBRID mode
-constexpr double default_host_device_compression_cost_ratio = 64;
+constexpr double default_host_device_compression_cost_ratio = 0;
 
 [[nodiscard]] constexpr std::optional<nvcomp::compression_type> to_nvcomp_compression(
   compression_type compression)
@@ -58,6 +58,9 @@ constexpr double default_host_device_compression_cost_ratio = 64;
     case compression_type::SNAPPY: return nvcomp::compression_type::SNAPPY;
     case compression_type::ZLIB: return nvcomp::compression_type::DEFLATE;
     case compression_type::ZSTD: return nvcomp::compression_type::ZSTD;
+    case compression_type::CASCADED: return nvcomp::compression_type::CASCADED;
+    case compression_type::DEFLATE: return nvcomp::compression_type::DEFLATE;
+    // case compression_type::BITCOMP: return nvcomp::compression_type::BITCOMP;
     default: return std::nullopt;
   }
 }

@@ -161,6 +161,9 @@ CUDF_HOST_DEVICE cuda::std::pair<compression_type, bool> parquet_compression_sup
     case Compression::SNAPPY: return {compression_type::SNAPPY, true};
     case Compression::ZSTD: return {compression_type::ZSTD, true};
     case Compression::UNCOMPRESSED: return {compression_type::NONE, true};
+    case Compression::CASCADED: return {compression_type::CASCADED, true};
+    case Compression::DEFLATE: return {compression_type::DEFLATE, true};
+    // case Compression::BITCOMP: return {compression_type::BITCOMP, true};
     default: break;
   }
   return {compression_type::NONE, false};
@@ -177,6 +180,9 @@ CUDF_HOST_DEVICE cuda::std::pair<compression_type, bool> parquet_compression_sup
     case Compression::SNAPPY: return "SNAPPY";
     case Compression::ZSTD: return "ZSTD";
     case Compression::UNCOMPRESSED: return "UNCOMPRESSED";
+    case Compression::CASCADED: return "CASCADED";
+    case Compression::DEFLATE: return "DEFLATE";
+    // case Compression::BITCOMP: return "BITCOMP";
   }
   CUDF_FAIL("Unsupported Parquet compression type");
 }
@@ -475,7 +481,11 @@ std::vector<row_range> compute_page_splits_by_row(device_span<cumulative_page_in
                     codec_stats{Compression::GZIP},
                     codec_stats{Compression::LZ4_RAW},
                     codec_stats{Compression::SNAPPY},
-                    codec_stats{Compression::ZSTD}};
+                    codec_stats{Compression::ZSTD},
+                    codec_stats{Compression::CASCADED},
+                    codec_stats{Compression::DEFLATE}
+                    // codec_stats{Compression::BITCOMP}
+                  };
 
   auto is_codec_supported = [&codecs](Compression codec) {
     if (codec == Compression::UNCOMPRESSED) return true;
