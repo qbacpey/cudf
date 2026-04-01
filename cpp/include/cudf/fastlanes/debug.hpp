@@ -102,6 +102,25 @@ inline const char* cast_mode_str(TypeCastMode mode)
   return cast_mode_str(static_cast<uint8_t>(mode));
 }
 
+inline const char* layout_mode_str(uint8_t mode)
+{
+  switch (mode) {
+    case static_cast<uint8_t>(PageLayoutMode::SCALAR32): return "SCALAR32";
+    case static_cast<uint8_t>(PageLayoutMode::SPLIT32): return "SPLIT32";
+    case static_cast<uint8_t>(PageLayoutMode::NATIVE64): return "NATIVE64";
+    default: return "UNKNOWN";
+  }
+}
+
+inline const char* bitwidth_mode_str(uint8_t mode)
+{
+  switch (mode) {
+    case static_cast<uint8_t>(BitwidthMode::SINGLE): return "SINGLE";
+    case static_cast<uint8_t>(BitwidthMode::SPLIT_COMPONENTS): return "SPLIT_COMPONENTS";
+    default: return "UNKNOWN";
+  }
+}
+
 // =============================================================================
 // Debug Print Configuration
 // =============================================================================
@@ -249,10 +268,16 @@ struct PageDebugInfo {
   // --- FastLanes header fields (always present when page_valid) ---
   uint8_t bitwidth;
   uint8_t cast_mode;  ///< TypeCastMode as uint8_t for device compatibility
+  uint8_t layout_mode;
+  uint8_t bitwidth_mode;
+  uint8_t component_bitwidth_low;
+  uint8_t component_bitwidth_high;
   uint32_t original_count;
   uint32_t padded_count;
   uint32_t body_size;
-  uint32_t min_value;
+  uint64_t min_value;
+  uint32_t min_value_low_bits;
+  uint32_t min_value_high_bits;
 
   // --- cuDF page metadata (optional) ---
   bool has_cudf_info;
@@ -287,11 +312,17 @@ inline PageDebugInfo make_debug_info(const PageHeader& hdr)
   PageDebugInfo info{};
   info.page_valid     = true;
   info.bitwidth       = hdr.bitwidth;
-  info.cast_mode      = static_cast<uint8_t>(hdr.cast_mode);
+  info.cast_mode      = 0;
+  info.layout_mode    = static_cast<uint8_t>(hdr.layout_mode);
+  info.bitwidth_mode  = static_cast<uint8_t>(hdr.bitwidth_mode);
+  info.component_bitwidth_low  = hdr.component_bitwidth_low;
+  info.component_bitwidth_high = hdr.component_bitwidth_high;
   info.original_count = hdr.original_count;
   info.padded_count   = hdr.padded_count;
   info.body_size      = hdr.body_size;
-  info.min_value      = hdr.min_value;
+  info.min_value      = hdr.min_value_bits();
+  info.min_value_low_bits  = hdr.min_value_low_bits;
+  info.min_value_high_bits = hdr.min_value_high_bits;
   info.has_cudf_info  = false;
   info.payload_preview_count = 0;
   return info;
@@ -305,16 +336,22 @@ inline PageDebugInfo make_debug_info(uint8_t bw,
                                      uint32_t orig_count,
                                      uint32_t pad_count,
                                      uint32_t body_sz,
-                                     uint32_t min_value)
+                                     uint64_t min_value)
 {
   PageDebugInfo info{};
   info.page_valid     = true;
   info.bitwidth       = bw;
   info.cast_mode      = static_cast<uint8_t>(mode);
+  info.layout_mode    = static_cast<uint8_t>(PageLayoutMode::SCALAR32);
+  info.bitwidth_mode  = static_cast<uint8_t>(BitwidthMode::SINGLE);
+  info.component_bitwidth_low  = bw;
+  info.component_bitwidth_high = 0;
   info.original_count = orig_count;
   info.padded_count   = pad_count;
   info.body_size      = body_sz;
   info.min_value      = min_value;
+  info.min_value_low_bits  = static_cast<uint32_t>(min_value);
+  info.min_value_high_bits = static_cast<uint32_t>(min_value >> 32);
   info.has_cudf_info  = false;
   info.payload_preview_count = 0;
   return info;
@@ -343,7 +380,7 @@ inline PageDebugInfo make_debug_info(uint8_t bw,
                                      uint32_t orig_count,
                                      uint32_t pad_count,
                                      uint32_t body_sz,
-                                     uint32_t min_value,
+                                     uint64_t min_value,
                                      const T* encoded_data,
                                      size_t encoded_elems)
 {
@@ -378,18 +415,24 @@ inline void print_fl_header(std::ostream& os, const PageDebugInfo& info)
   auto const restore_fill = os.fill();
   os << "\n--- FastLanes Page Header ---\n"
      << "  bitwidth        : " << static_cast<int>(info.bitwidth) << "\n"
-     << "  cast_mode       : " << static_cast<int>(info.cast_mode)
-     << " (" << cast_mode_str(info.cast_mode) << ")\n"
+     << "  layout_mode     : " << static_cast<int>(info.layout_mode)
+     << " (" << layout_mode_str(info.layout_mode) << ")\n"
+     << "  bitwidth_mode   : " << static_cast<int>(info.bitwidth_mode)
+     << " (" << bitwidth_mode_str(info.bitwidth_mode) << ")\n"
+     << "  bitwidth_lo/hi  : " << static_cast<int>(info.component_bitwidth_low) << "/"
+     << static_cast<int>(info.component_bitwidth_high) << "\n"
      << "  original_count  : " << info.original_count << "\n"
      << "  padded_count    : " << info.padded_count << "\n"
      << "  body_size       : " << info.body_size << " bytes\n"
-     << "  min_value_raw   : 0x" << std::hex << std::setw(8) << std::setfill('0')
+     << "  min_value_raw   : 0x" << std::hex << std::setw(16) << std::setfill('0')
      << info.min_value << std::dec << "\n"
+     << "  min_low/min_high: 0x" << std::hex << info.min_value_low_bits << "/0x"
+     << info.min_value_high_bits << std::dec << "\n"
      << "  min_value       : ";
-  if (fastlanes::is_valid_cast_mode(info.cast_mode)) {
-    os << fastlanes::u32_bits_to_int32(info.min_value);
+  if (info.has_cudf_info && info.dtype_len_in == 4) {
+    os << fastlanes::u32_bits_to_int32(static_cast<uint32_t>(info.min_value));
   } else {
-    os << "<invalid cast mode>";
+    os << fastlanes::u64_bits_to_int64(info.min_value);
   }
   os << "\n";
   os.fill(restore_fill);

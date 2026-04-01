@@ -63,16 +63,20 @@ using namespace cudf::io::detail;
 
 namespace {
 
-bool is_fastlanes_bitpack_supported_int32_schema(
-  Type physical_type,
-  cudf::type_id leaf_type,
-  cuda::std::optional<LogicalType> const& logical_type,
-  std::optional<ConvertedType> const& converted_type)
+constexpr bool is_signed_int32_leaf(cudf::type_id leaf_type)
 {
-  if (physical_type != Type::INT32) { return false; }
+  return leaf_type == cudf::type_id::INT8 || leaf_type == cudf::type_id::INT16 ||
+         leaf_type == cudf::type_id::INT32;
+}
 
-  // Primary allowlist keyed by cudf leaf type for supported INT32-physical logical classes.
-  // This avoids false negatives when logical/converted annotations are absent or rewritten.
+constexpr bool is_unsigned_int32_leaf(cudf::type_id leaf_type)
+{
+  return leaf_type == cudf::type_id::UINT8 || leaf_type == cudf::type_id::UINT16 ||
+         leaf_type == cudf::type_id::UINT32;
+}
+
+constexpr bool is_int32_fastlanes_leaf_allowlist(cudf::type_id leaf_type)
+{
   switch (leaf_type) {
     case cudf::type_id::INT8:
     case cudf::type_id::UINT8:
@@ -84,8 +88,46 @@ bool is_fastlanes_bitpack_supported_int32_schema(
     case cudf::type_id::DECIMAL32:
     case cudf::type_id::DURATION_SECONDS:
     case cudf::type_id::DURATION_MILLISECONDS: return true;
-    default: break;
+    default: return false;
   }
+}
+
+bool is_fastlanes_int64_schema_supported(cudf::type_id leaf_type,
+                                         cuda::std::optional<LogicalType> const& logical_type,
+                                         std::optional<ConvertedType> const& converted_type)
+{
+  if (leaf_type != cudf::type_id::INT64 && leaf_type != cudf::type_id::UINT64) { return false; }
+
+  if (!logical_type.has_value() && !converted_type.has_value()) {
+    return leaf_type == cudf::type_id::INT64;
+  }
+
+  if (logical_type.has_value()) {
+    auto const& logical = *logical_type;
+    if (logical.type != LogicalType::INTEGER || logical.bit_width() != 64) { return false; }
+
+    return (logical.is_signed() && leaf_type == cudf::type_id::INT64) ||
+           (!logical.is_signed() && leaf_type == cudf::type_id::UINT64);
+  }
+
+  if (converted_type.has_value()) {
+    switch (*converted_type) {
+      case ConvertedType::INT_64: return leaf_type == cudf::type_id::INT64;
+      case ConvertedType::UINT_64: return leaf_type == cudf::type_id::UINT64;
+      default: return false;
+    }
+  }
+
+  return false;
+}
+
+bool is_fastlanes_int32_schema_supported(cudf::type_id leaf_type,
+                                         cuda::std::optional<LogicalType> const& logical_type,
+                                         std::optional<ConvertedType> const& converted_type)
+{
+  // Primary allowlist keyed by cudf leaf type for supported INT32-physical logical classes.
+  // This avoids false negatives when logical/converted annotations are absent or rewritten.
+  if (is_int32_fastlanes_leaf_allowlist(leaf_type)) { return true; }
 
   // Plain INT32 without explicit logical annotation remains supported.
   if (!logical_type.has_value() && !converted_type.has_value()) { return true; }
@@ -95,12 +137,8 @@ bool is_fastlanes_bitpack_supported_int32_schema(
 
     if (logical.type == LogicalType::INTEGER) {
       auto const bit_width = logical.bit_width();
-      auto const is_signed_leaf =
-        leaf_type == cudf::type_id::INT8 || leaf_type == cudf::type_id::INT16 ||
-        leaf_type == cudf::type_id::INT32;
-      auto const is_unsigned_leaf =
-        leaf_type == cudf::type_id::UINT8 || leaf_type == cudf::type_id::UINT16 ||
-        leaf_type == cudf::type_id::UINT32;
+      auto const is_signed_leaf = is_signed_int32_leaf(leaf_type);
+      auto const is_unsigned_leaf = is_unsigned_int32_leaf(leaf_type);
       return (is_signed_leaf || is_unsigned_leaf) &&
              (bit_width == 8 || bit_width == 16 || bit_width == 32);
     }
@@ -119,14 +157,10 @@ bool is_fastlanes_bitpack_supported_int32_schema(
     switch (*converted_type) {
       case ConvertedType::INT_8:
       case ConvertedType::INT_16:
-      case ConvertedType::INT_32:
-        return leaf_type == cudf::type_id::INT8 || leaf_type == cudf::type_id::INT16 ||
-               leaf_type == cudf::type_id::INT32;
+      case ConvertedType::INT_32: return is_signed_int32_leaf(leaf_type);
       case ConvertedType::UINT_8:
       case ConvertedType::UINT_16:
-      case ConvertedType::UINT_32:
-        return leaf_type == cudf::type_id::UINT8 || leaf_type == cudf::type_id::UINT16 ||
-               leaf_type == cudf::type_id::UINT32;
+      case ConvertedType::UINT_32: return is_unsigned_int32_leaf(leaf_type);
       case ConvertedType::DATE: return leaf_type == cudf::type_id::TIMESTAMP_DAYS;
       case ConvertedType::DECIMAL: return leaf_type == cudf::type_id::DECIMAL32;
       case ConvertedType::TIME_MILLIS:
@@ -134,6 +168,23 @@ bool is_fastlanes_bitpack_supported_int32_schema(
                leaf_type == cudf::type_id::DURATION_SECONDS;
       default: break;
     }
+  }
+
+  return false;
+}
+
+bool is_fastlanes_bitpack_supported_schema(
+  Type physical_type,
+  cudf::type_id leaf_type,
+  cuda::std::optional<LogicalType> const& logical_type,
+  std::optional<ConvertedType> const& converted_type)
+{
+  if (physical_type == Type::INT64) {
+    return is_fastlanes_int64_schema_supported(leaf_type, logical_type, converted_type);
+  }
+
+  if (physical_type == Type::INT32) {
+    return is_fastlanes_int32_schema_supported(leaf_type, logical_type, converted_type);
   }
 
   return false;
@@ -826,16 +877,16 @@ std::vector<schema_tree_node> construct_parquet_schema_tree(
             case column_encoding::DICTIONARY: break;
 
             case column_encoding::FASTLANES_BITPACK:
-              if (s.type != Type::INT32) {
+              if (s.type != Type::INT32 && s.type != Type::INT64) {
                 CUDF_LOG_WARN(
-                  "FASTLANES_BITPACK encoding is only supported for INT32 column; the "
+                  "FASTLANES_BITPACK encoding is only supported for INT32/INT64 columns; the "
                   "requested encoding will be ignored");
                 return;
               }
-              if (!is_fastlanes_bitpack_supported_int32_schema(
+              if (!is_fastlanes_bitpack_supported_schema(
                     s.type, s.leaf_column->type().id(), s.logical_type, s.converted_type)) {
                 CUDF_LOG_WARN(
-                  "FASTLANES_BITPACK encoding is unsupported for this INT32 logical type; "
+                  "FASTLANES_BITPACK encoding is unsupported for this logical type; "
                   "the requested encoding will be ignored");
                 return;
               }

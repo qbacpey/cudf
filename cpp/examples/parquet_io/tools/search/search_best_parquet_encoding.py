@@ -13,6 +13,26 @@ Search strategy:
 
 Default scope optimizes INT32 physical columns that are currently FastLanes-supported.
 You can expand to all columns or a custom list.
+
+Input:
+- --input parquet file
+- --binary parquet_io_chunk executable
+
+Effect:
+- Runs multiple trial rewrites, compares output parquet size, and keeps the best map.
+
+Outputs:
+- search_summary.json and search_summary.md in --work-dir
+- trial_*.log (and optionally trial parquet files)
+
+Recommended layered storage:
+- Write --work-dir under 03_raw for generated machine data.
+
+Usage example:
+    python3 ./tools/search/search_best_parquet_encoding.py \
+        --input ./CUDF-0003.roundtrip.parquet \
+        --binary ./build/parquet_io_chunk \
+        --work-dir ./artifacts/fastlanes/encoding_search_runs/run_<id>/03_raw
 """
 
 from __future__ import annotations
@@ -286,7 +306,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--work-dir",
-        default="./reports/fastlanes/encoding_search_runs",
+        default="./artifacts/fastlanes/encoding_search_runs",
         help="Directory for trial outputs/logs/results",
     )
     p.add_argument(

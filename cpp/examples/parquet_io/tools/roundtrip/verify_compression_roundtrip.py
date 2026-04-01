@@ -10,6 +10,18 @@ This script tests GPU-specific compression codecs by:
 4. VALIDATE: Compare original vs backward file to verify data integrity
 5. COMPARE: Compare compression ratios and times against SNAPPY baseline
 
+Inputs:
+- input parquet path
+- optional encoding/batch-size/codec list/validator options
+
+Outputs:
+- timestamped result directory with logs and summary tables
+- pass/fail status for each tested codec
+
+Recommended layout:
+- place generated directories under 03_raw when integrating with the layered
+    parquet_io artifacts convention.
+
 Usage:
     python verify_compression_roundtrip.py <input.parquet> [options]
 

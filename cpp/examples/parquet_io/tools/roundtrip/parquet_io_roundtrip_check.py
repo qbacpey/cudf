@@ -100,6 +100,19 @@ Example:
             l_shipinstruct:FASTLANES_BITPACK,\
             l_shipmode:FASTLANES_BITPACK,\
             l_comment:DICTIONARY"
+
+Input:
+- --input parquet path (or --compare-other for direct compare mode)
+- --cpp-binary when using C++ chunked conversion
+
+Effect:
+- Runs cudf or parquet_io_chunk conversion and validates equivalence.
+
+Outputs:
+- Output parquet (if --keep-output)
+- Optional C++ log file via --cpp-log-file
+- In non-streamed mode, captured stdout/stderr are appended to --cpp-log-file
+    so downstream tools can parse FastLanes debug lines.
 """
 
 from __future__ import annotations
@@ -322,6 +335,24 @@ def _run_cpp_chunk_conversion(args: argparse.Namespace, input_path: str, output_
             proc = subprocess.run(cmd, capture_output=True, **run_kwargs)
             stdout_text = proc.stdout or ""
             stderr_text = proc.stderr or ""
+            # Keep chunk output near the C++ log file so downstream parsers can
+            # consume FastLanes debug lines without requiring streamed console logs.
+            if args.cpp_log_file:
+                try:
+                    with open(args.cpp_log_file, "a", encoding="utf-8") as f:
+                        if stdout_text:
+                            f.write("\n=== STDOUT CAPTURE ===\n")
+                            f.write(stdout_text)
+                            if not stdout_text.endswith("\n"):
+                                f.write("\n")
+                        if stderr_text:
+                            f.write("\n=== STDERR CAPTURE ===\n")
+                            f.write(stderr_text)
+                            if not stderr_text.endswith("\n"):
+                                f.write("\n")
+                except OSError:
+                    # Logging failures should not hide conversion results.
+                    pass
     except OSError as exc:
         return False, f"Failed to execute chunked binary: {exc}", 0.0
 

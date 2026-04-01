@@ -1,0 +1,34 @@
+{
+  "run_id": "20260402_120129",
+  "input_file": "/home/qchen/GPUFileFormat-cudf/cpp/examples/parquet_io/CUDF-0003.roundtrip.parquet",
+  "roundtrip_script": "/home/qchen/GPUFileFormat-cudf/cpp/examples/parquet_io/tools/roundtrip/parquet_io_roundtrip_check.py",
+  "cpp_binary": "/home/qchen/GPUFileFormat-cudf/cpp/examples/parquet_io/build/parquet_io_chunk",
+  "compression": "SNAPPY",
+  "batch_size": 2,
+  "int64_targets": [
+    "l_orderkey",
+    "l_partkey",
+    "l_suppkey",
+    "l_linenumber",
+    "l_quantity",
+    "l_extendedprice",
+    "l_discount",
+    "l_tax"
+  ],
+  "cases": [
+    "baseline_delta",
+    "l_orderkey_fastlane",
+    "l_partkey_fastlane",
+    "l_suppkey_fastlane",
+    "l_linenumber_fastlane",
+    "l_quantity_fastlane",
+    "l_extendedprice_fastlane",
+    "l_discount_fastlane",
+    "l_tax_fastlane",
+    "all_int64_fastlane"
+  ],
+  "enable_debug_env": {
+    "FLS_DEBUG_WORKLOAD": "1",
+    "FLS_DEBUG_HEADER": "1"
+  }
+}

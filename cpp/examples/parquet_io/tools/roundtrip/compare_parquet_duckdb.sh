@@ -8,6 +8,7 @@
 # Compares two parquet files for data equality using anti-join logic
 #
 # Usage: ./compare_parquet_duckdb.sh <file1.parquet> <file2.parquet>
+# Output: prints row counts, symmetric differences, and final identical/different verdict.
 #
 # =============================================================================
 

@@ -388,6 +388,26 @@ void roundtrip_single_column_typed_expect_not_encoding(
 
 }  // namespace
 
+// =============================================================================
+// FastLanes Test Organization
+// =============================================================================
+// This file is intentionally grouped by behavior area:
+// 1) INT32 baseline and edge-path roundtrip
+// 2) Header metadata validity
+// 3) INT32 logical-type eligibility matrix
+// 4) INT64/UINT64 split32 data-path coverage
+// 5) Unsupported logical fallback behavior
+// 6) Mixed-encoding workload-like scenarios
+//
+// Naming convention:
+// - "ForcedBitpack" means FastLanes encoding is requested explicitly.
+// - "Fallback" means FastLanes was requested but should be rejected for safety.
+// - "BoundarySizes" focuses on 1024-vector boundaries and tail-page behavior.
+
+// -----------------------------------------------------------------------------
+// Group 1: INT32 baseline and edge-path roundtrip
+// -----------------------------------------------------------------------------
+
 TEST_F(ParquetCpuEncoderTest, SimpleInt32SinglePage)
 {
   std::vector<int32_t> values(2050);
@@ -453,7 +473,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesInt32MultiPageDifferentBitwidths)
 //     values_u32[i] = (i % 5 == 0) ? std::numeric_limits<uint32_t>::max() - static_cast<uint32_t>(i)
 //                                  : static_cast<uint32_t>(i * 13);
 //   }
-// TODO: 这个函数的实现也有问题，得处理一下
+// TODO: Multi-column helper is currently disabled and needs a dedicated rework.
 //   roundtrip_two_columns(
 //     values_i32, values_u32, "test_fastlanes_multi_col_multi_page.parquet", 512, 4096);
 // }
@@ -464,7 +484,7 @@ TEST_F(ParquetCpuEncoderTest, Int32WithSpecificValuesLarge)
   // Keep a larger mixed-pattern case as a stress test.
   std::vector<int32_t> values(1000);
   std::iota(values.begin(), values.end(), 0);
-  // 这个只有一个Vector所以不会干扰
+  // Single-vector stress case; keeps setup simple while exercising negative/magnitude extremes.
   values[0]   = -1;
   values[500] = 12345;
   values[999] = -12345;
@@ -508,9 +528,8 @@ TEST_F(ParquetCpuEncoderTest, FallbackForUnsupportedType)
 TEST_F(ParquetCpuEncoderTest, Int32WithSpecificValues)
 {
   // Small-vector edge case with negatives and mixed magnitudes.
-  // std::vector<int32_t> values(1000);
-  // TODO: 其实这么一看出问题的测试用例都是编码过后的大小还不如未编码过后的，所以第一，元素过少的话，第二，元素过大（位宽过大）的话，似乎都会出问题
-  // 所以我觉得最好的策略是如果发现编码过后的数据比未编码过后的数据还大的话，干脆Fallback成其他编码算了
+  // Note: very small pages and very high per-page bitwidth are the two common stressors where
+  // encoded payload can approach or exceed plain size. This test keeps that corner visible.
   std::vector<int32_t> values(1000);
   // std::vector<int32_t> values = {0, -1, 1, 100, -100, 2, -2, 12345, -12345, 42};
   std::iota(values.begin(), values.end(), 0);
@@ -574,6 +593,10 @@ TEST_F(ParquetCpuEncoderTest, FastLanesUInt32BoundaryAcrossSignedSplitForcedBitp
     4096);
 }
 
+// -----------------------------------------------------------------------------
+// Group 2: INT32 high-bitwidth diagnostics and tail-page behavior
+// -----------------------------------------------------------------------------
+
 TEST_F(ParquetCpuEncoderTest, FastLanesInt32NegativeCastingAndExtremes)
 {
   std::vector<int32_t> values(2050, 0);
@@ -634,34 +657,74 @@ TEST_F(ParquetCpuEncoderTest, FastLanesInt32HighBitwidthTinyTailPage)
   roundtrip_single_column(values, "test_fastlanes_i32_high_bw_tiny_tail.parquet", 1024, 4096);
 }
 
-TEST_F(ParquetCpuEncoderTest, FastLanesHeaderRoundTripPreservesMinValue)
+TEST_F(ParquetCpuEncoderTest, FastLanesHeaderScalar32MetadataRoundTrip)
 {
-  auto const min_value = fastlanes::int32_to_u32_bits(-1234567);
-  auto blob            = fastlanes::PageHeader::serialize(
-    17, fastlanes::TypeCastMode::SIGNED_REINTERPRET, 100, 1024, min_value, nullptr, 0);
+  auto const min_value_low = static_cast<uint32_t>(fastlanes::int32_to_u32_bits(-1234567));
+  std::vector<uint8_t> body(fastlanes::encoded_size_bytes(1024, 17), uint8_t{0});
+  auto blob                = fastlanes::PageHeader::serialize_scalar32(
+    17, 100, 1024, min_value_low, body.data(), body.size());
 
   auto const header = fastlanes::PageHeader::deserialize(blob.data());
 
   EXPECT_EQ(header.bitwidth, 17);
-  EXPECT_EQ(header.cast_mode, fastlanes::TypeCastMode::SIGNED_REINTERPRET);
+  EXPECT_EQ(header.layout_mode, fastlanes::PageLayoutMode::SCALAR32);
+  EXPECT_EQ(header.bitwidth_mode, fastlanes::BitwidthMode::SINGLE);
+  EXPECT_EQ(header.component_bitwidth_low, 17);
+  EXPECT_EQ(header.component_bitwidth_high, 0);
   EXPECT_EQ(header.original_count, 100);
   EXPECT_EQ(header.padded_count, 1024);
-  EXPECT_EQ(header.body_size, 0);
-  EXPECT_EQ(header.min_value, min_value);
-  EXPECT_EQ(fastlanes::u32_bits_to_int32(header.min_value), -1234567);
+  EXPECT_EQ(header.body_size, body.size());
+  EXPECT_EQ(header.min_value_low_bits, min_value_low);
+  EXPECT_EQ(header.min_value_high_bits, 0);
+  EXPECT_TRUE(header.is_scalar32_layout());
+  EXPECT_FALSE(header.is_split32_layout());
+  EXPECT_TRUE(fastlanes::is_valid_for_physical(header, false));
+  EXPECT_EQ(fastlanes::u32_bits_to_int32(header.min_value_low_bits), -1234567);
 }
 
-TEST_F(ParquetCpuEncoderTest, FastLanesHeaderRejectsLegacyUnsignedCastMode)
+// -----------------------------------------------------------------------------
+// Group 3: Header metadata validity (scalar32/split32)
+// -----------------------------------------------------------------------------
+
+TEST_F(ParquetCpuEncoderTest, FastLanesHeaderSplit32MetadataRoundTrip)
 {
-  auto blob = fastlanes::PageHeader::serialize(
-    7, static_cast<fastlanes::TypeCastMode>(0), 64, 1024, 0u, nullptr, 0);
+  std::vector<uint8_t> body(fastlanes::encoded_size_bytes(1024, 13) +
+                            fastlanes::encoded_size_bytes(1024, 27),
+                            uint8_t{0});
+  auto blob = fastlanes::PageHeader::serialize_split32(
+    13, 27, 64, 1024, 0x89abcdefu, 0x10203040u, body.data(), body.size());
 
   auto const header = fastlanes::PageHeader::deserialize(blob.data());
 
-  EXPECT_FALSE(fastlanes::is_valid_cast_mode(header.cast_mode));
-  EXPECT_FALSE(fastlanes::is_valid_cast_mode(static_cast<uint8_t>(header.cast_mode)));
-  EXPECT_TRUE(fastlanes::is_valid_cast_mode(fastlanes::TypeCastMode::SIGNED_SAFE));
-  EXPECT_TRUE(fastlanes::is_valid_cast_mode(fastlanes::TypeCastMode::SIGNED_REINTERPRET));
+  EXPECT_EQ(header.layout_mode, fastlanes::PageLayoutMode::SPLIT32);
+  EXPECT_EQ(header.bitwidth_mode, fastlanes::BitwidthMode::SPLIT_COMPONENTS);
+  EXPECT_EQ(header.component_bitwidth_low, 13);
+  EXPECT_EQ(header.component_bitwidth_high, 27);
+  EXPECT_EQ(header.min_value_low_bits, 0x89abcdefu);
+  EXPECT_EQ(header.min_value_high_bits, 0x10203040u);
+  EXPECT_TRUE(header.is_split32_layout());
+  EXPECT_FALSE(header.is_scalar32_layout());
+  EXPECT_TRUE(fastlanes::is_valid_for_physical(header, true));
+  EXPECT_FALSE(fastlanes::is_valid_for_physical(header, false));
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesHeaderRejectsMalformedSplit32Metadata)
+{
+  auto malformed = fastlanes::PageHeader::serialize_split32(7, 7, 64, 1024, 0u, 0u, nullptr, 0);
+
+  auto header = fastlanes::PageHeader::deserialize(malformed.data());
+  EXPECT_FALSE(fastlanes::is_valid_for_physical(header, true));
+
+  malformed[fastlanes::PageHeader::OFFSET_BITWIDTH_MODE] =
+    static_cast<uint8_t>(fastlanes::BitwidthMode::SINGLE);
+  header = fastlanes::PageHeader::deserialize(malformed.data());
+  EXPECT_FALSE(fastlanes::is_valid_for_physical(header, true));
+
+  malformed[fastlanes::PageHeader::OFFSET_BITWIDTH_MODE] =
+    static_cast<uint8_t>(fastlanes::BitwidthMode::SPLIT_COMPONENTS);
+  malformed[fastlanes::PageHeader::OFFSET_COMPONENT_BW_LOW] = 0;
+  header = fastlanes::PageHeader::deserialize(malformed.data());
+  EXPECT_FALSE(fastlanes::is_valid_for_physical(header, true));
 }
 
 TEST_F(ParquetCpuEncoderTest, FastLanesMixedEncodingsWithDate32LogicalType)
@@ -735,6 +798,10 @@ TEST_F(ParquetCpuEncoderTest, FastLanesMixedEncodingsWithDate32LogicalType)
   roundtrip_with_metadata(
     input, metadata, "test_fastlanes_mixed_with_date32_logical.parquet", 1024, 4096);
 }
+
+// -----------------------------------------------------------------------------
+// Group 4: INT32 logical-type force-enabled coverage
+// -----------------------------------------------------------------------------
 
 TEST_F(ParquetCpuEncoderTest, FastLanesDate32LogicalTypeForcedBitpack)
 {
@@ -976,6 +1043,556 @@ TEST_F(ParquetCpuEncoderTest, FastLanesUInt16LogicalTypeForcedBitpack)
     4096);
 }
 
+// -----------------------------------------------------------------------------
+// Group 5: INT64/UINT64 split32 data-path coverage
+// -----------------------------------------------------------------------------
+
+TEST_F(ParquetCpuEncoderTest, FastLanesInt64SinglePageForcedBitpack)
+{
+  std::vector<int64_t> values(2050);
+  std::iota(values.begin(), values.end(), int64_t{2});
+
+  roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
+    values,
+    "test_fastlanes_i64_single_page_forced_bitpack.parquet",
+    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    1024,
+    4096);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesInt64MultiplePagesForcedBitpack)
+{
+  std::vector<int64_t> values(50000);
+  std::iota(values.begin(), values.end(), int64_t{4});
+
+  roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
+    values,
+    "test_fastlanes_i64_multi_page_forced_bitpack.parquet",
+    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    1024,
+    4096);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesInt64SinglePageNegativeForcedBitpack)
+{
+  std::vector<int64_t> values(2050);
+  std::iota(values.begin(), values.end(), int64_t{-1025});
+  values[2] = 0;
+  values[3] = 1;
+
+  roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
+    values,
+    "test_fastlanes_i64_single_page_negative_forced_bitpack.parquet",
+    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    1024,
+    4096);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesInt64TinySizesAndPaddingBoundariesForcedBitpack)
+{
+  std::vector<int32_t> const test_sizes = {
+    1, 2, 3, 31, 32, 33, 63, 64, 65, 127, 128, 129, 511, 512, 513, 1023, 1024, 1025, 2047, 2048,
+    2049};
+
+  for (auto const n : test_sizes) {
+    std::vector<int64_t> values(n);
+    for (int32_t i = 0; i < n; ++i) {
+      values[i] = static_cast<int64_t>(i) - static_cast<int64_t>(n / 2);
+    }
+
+    std::string const file_name = "test_fastlanes_i64_tiny_size_" + std::to_string(n) +
+                                  "_forced_bitpack.parquet";
+    roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
+      values, file_name, cudf::io::parquet::Encoding::FASTLANES_BITPACK, 1024, 4096);
+  }
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesInt64MultiPageDifferentBitwidthsForcedBitpack)
+{
+  std::vector<int64_t> values(3 * 1024, 0);
+
+  for (int i = 0; i < 1024; ++i) { values[i] = i % 16; }
+  for (int i = 0; i < 1024; ++i) { values[1024 + i] = (int64_t{1} << 40) + i; }
+  for (int i = 0; i < 1024; ++i) { values[2048 + i] = -((int64_t{1} << 42) + (i % 97)); }
+
+  roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
+    values,
+    "test_fastlanes_i64_multi_page_bw_forced_bitpack.parquet",
+    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    1024,
+    4096);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesInt64HighBitwidthFullPagesForcedBitpack)
+{
+  std::vector<int64_t> values(2048, 0);
+  for (size_t i = 0; i < values.size(); ++i) {
+    values[i] = -((int64_t{1} << 52) + static_cast<int64_t>(i * 37));
+  }
+
+  values[0]    = std::numeric_limits<int64_t>::min() + 1024;
+  values[1]    = -1;
+  values[2]    = 0;
+  values[3]    = 1;
+  values[1024] = std::numeric_limits<int64_t>::max() - 4096;
+  values[2047] = std::numeric_limits<int64_t>::min() / 2;
+
+  roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
+    values,
+    "test_fastlanes_i64_high_bw_full_pages_forced_bitpack.parquet",
+    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    1024,
+    4096);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesInt64HighBitwidthTinyTailPageForcedBitpack)
+{
+  std::vector<int64_t> values(2050, 0);
+  for (size_t i = 0; i < values.size(); ++i) {
+    values[i] = -((int64_t{1} << 52) + static_cast<int64_t>(i * 37));
+  }
+
+  values[0]    = std::numeric_limits<int64_t>::min() + 1024;
+  values[1]    = -1;
+  values[2]    = 0;
+  values[3]    = 1;
+  values[1024] = std::numeric_limits<int64_t>::max() - 4096;
+  values[2049] = std::numeric_limits<int64_t>::min() / 2;
+
+  roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
+    values,
+    "test_fastlanes_i64_high_bw_tiny_tail_forced_bitpack.parquet",
+    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    1024,
+    4096);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesInt64DataRoundtripCoverage)
+{
+  auto const expected_encoding = cudf::io::parquet::Encoding::FASTLANES_BITPACK;
+
+  std::vector<int64_t> values(2050);
+  for (size_t i = 0; i < values.size(); ++i) {
+    auto const idx = static_cast<int64_t>(i + 1);
+    values[i]      = (i % 2 == 0) ? ((int64_t{1} << 40) + idx * 17)
+                                  : -((int64_t{1} << 40) + idx * 29);
+  }
+
+  values[0]                 = std::numeric_limits<int64_t>::min() + 12345;
+  values[1]                 = -1;
+  values[2]                 = 0;
+  values[3]                 = 1;
+  values[1023]              = std::numeric_limits<int64_t>::max() - 333;
+  values[1024]              = std::numeric_limits<int64_t>::min() / 2;
+  values[values.size() - 1] = std::numeric_limits<int64_t>::max();
+
+  // Data-path roundtrip coverage for split32 INT64 FastLanes.
+  roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
+    values,
+    "test_fastlanes_i64_physical_logical_roundtrip.parquet",
+    expected_encoding,
+    1024,
+    4096);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesInt64NegativeCastingAndExtremes)
+{
+  std::vector<int64_t> values(3075);
+  for (size_t i = 0; i < values.size(); ++i) {
+    auto const shifted = static_cast<int64_t>(i % 2048) - 1024;
+    values[i]          = shifted * (int64_t{1} << 44) + static_cast<int64_t>((i * 41) % 4096);
+  }
+
+  values[0]                 = std::numeric_limits<int64_t>::min() + 7;
+  values[1]                 = std::numeric_limits<int64_t>::min() + 8;
+  values[2]                 = -1;
+  values[3]                 = 0;
+  values[1023]              = std::numeric_limits<int64_t>::max() - 9;
+  values[1024]              = std::numeric_limits<int64_t>::min() / 3;
+  values[values.size() - 1] = std::numeric_limits<int64_t>::max();
+
+  roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
+    values,
+    "test_fastlanes_i64_negative_extremes_roundtrip.parquet",
+    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    1024,
+    4096);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesInt64BoundarySizesForcedBitpack)
+{
+  // Boundary-size data-path coverage for split32 INT64 FastLanes.
+  std::vector<int32_t> const test_sizes = {
+    1, 2, 3, 31, 32, 33, 63, 64, 65, 127, 128, 129, 511, 512, 513, 1023, 1024, 1025, 2047, 2048,
+    2049};
+
+  for (auto const n : test_sizes) {
+    std::vector<int64_t> values(n);
+    for (int32_t i = 0; i < n; ++i) {
+      auto const ii = static_cast<int64_t>(i);
+      values[i]     = (i % 2 == 0) ? ((int64_t{1} << 45) + ii * 37)
+                                   : -((int64_t{1} << 44) + ii * 53);
+    }
+
+    if (n > 0) { values[0] = std::numeric_limits<int64_t>::min() + 41; }
+    if (n > 1) { values[1] = std::numeric_limits<int64_t>::max() - 99; }
+    if (n > 1023) { values[1023] = -1; }
+    if (n > 1024) { values[1024] = 0; }
+
+    std::string const file_name = "test_fastlanes_i64_boundary_size_" + std::to_string(n) +
+                                  "_forced_bitpack.parquet";
+    roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
+      values, file_name, cudf::io::parquet::Encoding::FASTLANES_BITPACK, 1024, 4096);
+  }
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesUInt64SinglePageForcedBitpack)
+{
+  std::vector<uint64_t> values(2050);
+  std::iota(values.begin(), values.end(), uint64_t{2});
+
+  roundtrip_single_column_typed_expect_encoding<uint64_t, uint64_t>(
+    values,
+    "test_fastlanes_u64_single_page_forced_bitpack.parquet",
+    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    1024,
+    4096);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesUInt64MultiplePagesForcedBitpack)
+{
+  std::vector<uint64_t> values(50000);
+  std::iota(values.begin(), values.end(), uint64_t{4});
+
+  roundtrip_single_column_typed_expect_encoding<uint64_t, uint64_t>(
+    values,
+    "test_fastlanes_u64_multi_page_forced_bitpack.parquet",
+    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    1024,
+    4096);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesUInt64TinySizesAndPaddingBoundariesForcedBitpack)
+{
+  std::vector<int32_t> const test_sizes = {
+    1, 2, 3, 31, 32, 33, 63, 64, 65, 127, 128, 129, 511, 512, 513, 1023, 1024, 1025, 2047, 2048,
+    2049};
+
+  for (auto const n : test_sizes) {
+    std::vector<uint64_t> values(n);
+    for (int32_t i = 0; i < n; ++i) {
+      values[i] = static_cast<uint64_t>(i) * 17ULL + 1ULL;
+    }
+
+    std::string const file_name = "test_fastlanes_u64_tiny_size_" + std::to_string(n) +
+                                  "_forced_bitpack.parquet";
+    roundtrip_single_column_typed_expect_encoding<uint64_t, uint64_t>(
+      values, file_name, cudf::io::parquet::Encoding::FASTLANES_BITPACK, 1024, 4096);
+  }
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesUInt64MultiPageDifferentBitwidthsForcedBitpack)
+{
+  std::vector<uint64_t> values(3 * 1024, 0);
+
+  for (int i = 0; i < 1024; ++i) { values[i] = static_cast<uint64_t>(i % 16); }
+  for (int i = 0; i < 1024; ++i) {
+    values[1024 + i] = (uint64_t{1} << 40) + static_cast<uint64_t>(i);
+  }
+  for (int i = 0; i < 1024; ++i) {
+    values[2048 + i] = std::numeric_limits<uint64_t>::max() - static_cast<uint64_t>(i * 97ULL);
+  }
+
+  roundtrip_single_column_typed_expect_encoding<uint64_t, uint64_t>(
+    values,
+    "test_fastlanes_u64_multi_page_bw_forced_bitpack.parquet",
+    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    1024,
+    4096);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesUInt64HighBitwidthFullPagesForcedBitpack)
+{
+  std::vector<uint64_t> values(2048, 0);
+  for (size_t i = 0; i < values.size(); ++i) {
+    values[i] = std::numeric_limits<uint64_t>::max() - static_cast<uint64_t>(i * 37ULL);
+  }
+
+  values[0]    = 0ULL;
+  values[1]    = 1ULL;
+  values[2]    = (uint64_t{1} << 63) - 1ULL;
+  values[3]    = (uint64_t{1} << 63);
+  values[1024] = std::numeric_limits<uint64_t>::max() - 3ULL;
+  values[2047] = std::numeric_limits<uint64_t>::max();
+
+  roundtrip_single_column_typed_expect_encoding<uint64_t, uint64_t>(
+    values,
+    "test_fastlanes_u64_high_bw_full_pages_forced_bitpack.parquet",
+    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    1024,
+    4096);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesUInt64HighBitwidthTinyTailPageForcedBitpack)
+{
+  std::vector<uint64_t> values(2050, 0);
+  for (size_t i = 0; i < values.size(); ++i) {
+    values[i] = std::numeric_limits<uint64_t>::max() - static_cast<uint64_t>(i * 37ULL);
+  }
+
+  values[0]    = 0ULL;
+  values[1]    = 1ULL;
+  values[2]    = (uint64_t{1} << 63) - 1ULL;
+  values[3]    = (uint64_t{1} << 63);
+  values[1024] = std::numeric_limits<uint64_t>::max() - 3ULL;
+  values[2049] = std::numeric_limits<uint64_t>::max();
+
+  roundtrip_single_column_typed_expect_encoding<uint64_t, uint64_t>(
+    values,
+    "test_fastlanes_u64_high_bw_tiny_tail_forced_bitpack.parquet",
+    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    1024,
+    4096);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesUInt64BoundaryAcrossSignedSplitForcedBitpack)
+{
+  std::vector<uint64_t> values(2048, 0);
+
+  for (size_t i = 0; i < 1024; ++i) {
+    values[i] = static_cast<uint64_t>(i % 257);
+  }
+  for (size_t i = 1024; i < values.size(); ++i) {
+    values[i] = std::numeric_limits<uint64_t>::max() - static_cast<uint64_t>(i % 257);
+  }
+
+  values[0]    = 0ULL;
+  values[1]    = static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) - 1ULL;
+  values[1023] = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+  values[1024] = static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) + 1ULL;
+  values[1025] = std::numeric_limits<uint64_t>::max() - 1ULL;
+  values[2047] = std::numeric_limits<uint64_t>::max();
+
+  roundtrip_single_column_typed_expect_encoding<uint64_t, uint64_t>(
+    values,
+    "test_fastlanes_u64_signed_split_boundary_forced_bitpack.parquet",
+    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    1024,
+    4096);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesUInt64FullRangeForcedBitpack)
+{
+  // Full-range UINT64 data-path coverage for split32 FastLanes.
+  std::vector<uint64_t> values(3075);
+  for (size_t i = 0; i < values.size(); ++i) {
+    auto const ii = static_cast<uint64_t>(i + 1);
+    values[i]     = (ii << 33) ^ (0x9e3779b97f4a7c15ULL * ii);
+  }
+
+  values[0]                 = 0ULL;
+  values[1]                 = 1ULL;
+  values[2]                 = static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+  values[3]                 = static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) + 1ULL;
+  values[4]                 = static_cast<uint64_t>(std::numeric_limits<uint32_t>::max());
+  values[5]                 = static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) + 1ULL;
+  values[6]                 = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+  values[7]                 = static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) + 1ULL;
+  values[1023]              = std::numeric_limits<uint64_t>::max() - 3ULL;
+  values[1024]              = std::numeric_limits<uint64_t>::max() - 2ULL;
+  values[values.size() - 1] = std::numeric_limits<uint64_t>::max();
+
+  roundtrip_single_column_typed_expect_encoding<uint64_t, uint64_t>(
+    values,
+    "test_fastlanes_u64_full_range_forced_bitpack_roundtrip.parquet",
+    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    1024,
+    4096);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesUInt64BoundarySizesForcedBitpack)
+{
+  // Boundary-size data-path coverage for split32 UINT64 FastLanes.
+  std::vector<int32_t> const test_sizes = {
+    1, 2, 3, 31, 32, 33, 63, 64, 65, 127, 128, 129, 511, 512, 513, 1023, 1024, 1025, 2047, 2048,
+    2049};
+
+  for (auto const n : test_sizes) {
+    std::vector<uint64_t> values(n);
+    for (int32_t i = 0; i < n; ++i) {
+      auto const ii = static_cast<uint64_t>(i);
+      values[i] = (i % 2 == 0) ? (ii << 34) : (std::numeric_limits<uint64_t>::max() - ii * 97ULL);
+    }
+
+    if (n > 0) { values[0] = 0ULL; }
+    if (n > 1) { values[1] = std::numeric_limits<uint64_t>::max(); }
+    if (n > 1023) { values[1023] = (uint64_t{1} << 63) - 1ULL; }
+    if (n > 1024) { values[1024] = (uint64_t{1} << 63); }
+
+    std::string const file_name = "test_fastlanes_u64_boundary_size_" + std::to_string(n) +
+                                  "_forced_bitpack.parquet";
+    roundtrip_single_column_typed_expect_encoding<uint64_t, uint64_t>(
+      values, file_name, cudf::io::parquet::Encoding::FASTLANES_BITPACK, 1024, 4096);
+  }
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesInt64PhysicalLogicalTypeSupportMatrix)
+{
+  auto const expected_physical = cudf::io::parquet::Type::INT64;
+  auto const expected_encoding = cudf::io::parquet::Encoding::FASTLANES_BITPACK;
+
+  std::vector<int64_t> i64_values(2050);
+  std::vector<uint64_t> u64_values(2050);
+
+  for (int i = 0; i < 2050; ++i) {
+    auto const ii = static_cast<int64_t>(i);
+    i64_values[i] = ((ii % 2) == 0) ? ((int64_t{1} << 40) + ii * 31)
+                                     : -((int64_t{1} << 39) + ii * 17);
+    u64_values[i] = (static_cast<uint64_t>(i + 1) << 35) ^
+                    (0x9e3779b97f4a7c15ULL * static_cast<uint64_t>(i + 1));
+  }
+
+  i64_values[0]    = std::numeric_limits<int64_t>::min() + 11;
+  i64_values[1]    = std::numeric_limits<int64_t>::max() - 13;
+  i64_values[1024] = -1;
+
+  u64_values[0]    = 0ULL;
+  u64_values[1]    = std::numeric_limits<uint64_t>::max();
+  u64_values[1024] = (uint64_t{1} << 63);
+
+  write_single_column_typed_expect_physical_and_encoding<int64_t>(
+    i64_values,
+    "test_fastlanes_matrix_support_i64.parquet",
+    expected_physical,
+    expected_encoding,
+    true,
+    false,
+    9,
+    1024,
+    4096);
+
+  write_single_column_typed_expect_physical_and_encoding<uint64_t>(
+    u64_values,
+    "test_fastlanes_matrix_support_u64.parquet",
+    expected_physical,
+    expected_encoding,
+    true,
+    false,
+    9,
+    1024,
+    4096);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesMixedEncodingsWithUint64FastLanesColumns)
+{
+  constexpr int num_rows = 4099;
+
+  std::vector<uint64_t> l_orderkey(num_rows);
+  std::vector<uint64_t> l_partkey(num_rows);
+  std::vector<int32_t> l_returnflag(num_rows);
+  std::vector<int32_t> l_linestatus(num_rows);
+  std::vector<cudf::timestamp_D::rep> l_shipdate(num_rows);
+
+  for (int i = 0; i < num_rows; ++i) {
+    auto const ii   = static_cast<uint64_t>(i + 1);
+    l_orderkey[i]   = (ii << 35) ^ (ii * 1315423911ULL);
+    l_partkey[i]    = (i % 3 == 0) ? (std::numeric_limits<uint64_t>::max() - ii * 41ULL)
+                                   : ((ii << 29) + ii * 97ULL);
+    l_returnflag[i] = i % 3;
+    l_linestatus[i] = i % 2;
+    l_shipdate[i]   = 18000 + (i % 3000);
+  }
+
+  l_orderkey[0] = 0ULL;
+  l_orderkey[1] = std::numeric_limits<uint64_t>::max();
+  l_partkey[0]  = (uint64_t{1} << 63);
+  l_partkey[1]  = (uint64_t{1} << 63) - 1ULL;
+
+  cudf::test::fixed_width_column_wrapper<uint64_t> col_orderkey(l_orderkey.begin(),
+                                                                 l_orderkey.end());
+  cudf::test::fixed_width_column_wrapper<uint64_t> col_partkey(l_partkey.begin(), l_partkey.end());
+  cudf::test::fixed_width_column_wrapper<int32_t> col_returnflag(l_returnflag.begin(),
+                                                                  l_returnflag.end());
+  cudf::test::fixed_width_column_wrapper<int32_t> col_linestatus(l_linestatus.begin(),
+                                                                  l_linestatus.end());
+  cudf::test::fixed_width_column_wrapper<cudf::timestamp_D, cudf::timestamp_D::rep> col_shipdate(
+    l_shipdate.begin(), l_shipdate.end());
+
+  cudf::table_view input({col_orderkey, col_partkey, col_returnflag, col_linestatus, col_shipdate});
+
+  cudf::io::table_input_metadata metadata(input);
+  metadata.column_metadata[0].set_name("l_orderkey");
+  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[1].set_name("l_partkey");
+  metadata.column_metadata[1].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[2].set_name("l_returnflag");
+  metadata.column_metadata[2].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[3].set_name("l_linestatus");
+  metadata.column_metadata[3].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[4].set_name("l_shipdate");
+  metadata.column_metadata[4].set_encoding(cudf::io::column_encoding::DICTIONARY);
+
+  roundtrip_with_metadata(
+    input, metadata, "test_fastlanes_mixed_with_u64_fastlanes_columns.parquet", 1024, 4096);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesMixedEncodingsWithInt64FastLanesColumns)
+{
+  constexpr int num_rows = 4099;
+
+  std::vector<int64_t> l_orderkey(num_rows);
+  std::vector<int64_t> l_partkey(num_rows);
+  std::vector<int32_t> l_returnflag(num_rows);
+  std::vector<int32_t> l_linestatus(num_rows);
+  std::vector<cudf::timestamp_D::rep> l_shipdate(num_rows);
+
+  for (int i = 0; i < num_rows; ++i) {
+    auto const ii   = static_cast<int64_t>(i);
+    l_orderkey[i]   = (ii << 33) - (ii * 17);
+    l_partkey[i]    = ((ii % 37) == 0) ? (std::numeric_limits<int64_t>::min() + ii)
+                                        : ((ii << 28) + (ii * 97));
+    l_returnflag[i] = i % 3;
+    l_linestatus[i] = i % 2;
+    l_shipdate[i]   = 18000 + (i % 3000);
+  }
+
+  l_orderkey[0] = std::numeric_limits<int64_t>::min() + 11;
+  l_orderkey[1] = std::numeric_limits<int64_t>::max() - 13;
+  l_partkey[0]  = std::numeric_limits<int64_t>::max();
+  l_partkey[1]  = std::numeric_limits<int64_t>::min();
+
+  cudf::test::fixed_width_column_wrapper<int64_t> col_orderkey(l_orderkey.begin(),
+                                                                l_orderkey.end());
+  cudf::test::fixed_width_column_wrapper<int64_t> col_partkey(l_partkey.begin(), l_partkey.end());
+  cudf::test::fixed_width_column_wrapper<int32_t> col_returnflag(l_returnflag.begin(),
+                                                                  l_returnflag.end());
+  cudf::test::fixed_width_column_wrapper<int32_t> col_linestatus(l_linestatus.begin(),
+                                                                  l_linestatus.end());
+  cudf::test::fixed_width_column_wrapper<cudf::timestamp_D, cudf::timestamp_D::rep> col_shipdate(
+    l_shipdate.begin(), l_shipdate.end());
+
+  cudf::table_view input({col_orderkey, col_partkey, col_returnflag, col_linestatus, col_shipdate});
+
+  cudf::io::table_input_metadata metadata(input);
+  metadata.column_metadata[0].set_name("l_orderkey");
+  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[1].set_name("l_partkey");
+  metadata.column_metadata[1].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[2].set_name("l_returnflag");
+  metadata.column_metadata[2].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[3].set_name("l_linestatus");
+  metadata.column_metadata[3].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[4].set_name("l_shipdate");
+  metadata.column_metadata[4].set_encoding(cudf::io::column_encoding::DICTIONARY);
+
+  roundtrip_with_metadata(
+    input, metadata, "test_fastlanes_mixed_with_i64_fastlanes_columns.parquet", 1024, 4096);
+}
+
+// -----------------------------------------------------------------------------
+// Group 6: INT32 physical logical-type support matrix and fallback matrix
+// -----------------------------------------------------------------------------
+
 TEST_F(ParquetCpuEncoderTest, FastLanesInt32PhysicalLogicalTypeSupportMatrix)
 {
   auto const expected_physical = cudf::io::parquet::Type::INT32;
@@ -1213,6 +1830,10 @@ TEST_F(ParquetCpuEncoderTest, FastLanesDurationNanosecondsNegativeLogicalTypeFal
     1024,
     4096);
 }
+
+// -----------------------------------------------------------------------------
+// Group 7: Mixed-encoding workload-pattern regression
+// -----------------------------------------------------------------------------
 
 TEST_F(ParquetCpuEncoderTest, FastLanesMixedEncodingsLowCardinalityInt32Pattern)
 {

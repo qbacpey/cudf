@@ -8,6 +8,7 @@
 # Compares two parquet files for data equality using PyArrow and Pandas
 #
 # Usage: ./compare_parquet_pyarrow.sh <file1.parquet> <file2.parquet>
+# Output: prints schema/row diff details and exits 0 on identical content, 1 otherwise.
 #
 # =============================================================================
 

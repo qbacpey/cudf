@@ -1,388 +1,171 @@
-# FastLanes Integration Handover Report (2026-03-28)
+# FastLanes Integration Handover Report (Updated 2026-04-02)
 
-## 1. Purpose
+## 1. Scope and Purpose
 
-This document is a handover report for the FastLanes integration in cuDF Parquet.
-It explains:
+This report documents the current FastLanes integration status in cuDF Parquet after the phase-2 split32 work. It focuses on:
 
-- what was integrated and why,
-- where code was changed and what each change means,
-- which trade-offs were explicitly chosen,
-- how to reproduce current behavior and results,
-- how to extend support (logical INT32 types, and future INT64 direction).
+- current INT32 and INT64/UINT64 behavior,
+- where encode/decode and gating logic live,
+- how test coverage is organized,
+- what to modify when native 64-bit FastLanes payload is introduced.
 
-## 2. Decision History and Scope Rationale
+## 2. Current Encoding Strategy
 
-This work started from exploring three families:
+### 2.1 INT32 physical columns
 
-- FastLanesGPU (integer-oriented)
-- G-ALP (floating-point-oriented)
-- FSST-GPU (string-oriented)
+INT32 physical columns use scalar32 FastLanes layout:
 
-Initial decision from discussion:
+- one packed stream,
+- one bitwidth per page,
+- page-local min value stored in header.
 
-- prioritize FastLanes in cuDF first,
-- keep path simple and practical,
-- focus on integer path before broader datatype coverage.
+### 2.2 INT64 and UINT64 logical data
 
-Why cuDF-first instead of Arrow-RS/Vortex path:
+INT64/UINT64 currently use split32 layout:
 
-- decode path is GPU-dependent and already coupled with cuDF parquet pipeline,
-- integrating at cuDF C++ layer gives direct control of writer/reader kernels,
-- avoids introducing Rust runtime/dependency coupling during initial implementation.
+- each page keeps the same logical row count,
+- values are split into low and high 32-bit components,
+- low and high components are encoded as two separate streams,
+- each stream has its own bitwidth and min component base.
 
-Pragmatic scope that was chosen:
+So your understanding is correct: current INT64/UINT64 handling is split into low/high vectors and encoded independently.
 
-- first make write/read path work for strict INT32-centric workloads,
-- defer broader type support and advanced bitwidth tuning until baseline pipeline is stable.
+## 3. Decode/Encode Architecture (Current)
 
-## 3. Current Supported Behavior (Important for Handover)
+### 3.1 Decode path
 
-Current FastLanes path is intentionally constrained:
+File:
+- cpp/src/io/parquet/page_fastlanes_decode.cu
 
-- flat columns only (no list/nested decode path in FastLanes kernel)
-- pages with nulls are rejected by FastLanes decode path
-- strict INT32 physical path with logical-type gating for safety
-- currently enabled logical classes (INT32 physical): INT8, UINT8, INT16, UINT16, INT32, UINT32, Date32, Decimal32, TimeMillis(duration_ms, duration_s)
-- explicitly unsupported logical class (still INT32 physical): TimeMillis(duration_D)
-- legacy UINT cast-mode pages (cast_mode=0) are rejected during decode
-- explicit fallback (requested FastLanes ignored) for unsupported INT32 logical classes
-- INT64 support is not production-ready in this path
+Current structure:
+- shared page setup and validation helper,
+- dedicated INT32 kernel path,
+- dedicated INT64 split32 kernel path,
+- host launch wrapper dispatches both type-specific kernels; each kernel exits early for non-matching physical pages.
 
-Key internal notes are in:
+### 3.2 Encode path
 
-- `cpp/include/cudf/fastlanes/IMPLEMENTATION_NOTES.md`
+File:
+- cpp/include/cudf/fastlanes/fastlanes_encode.cuh
 
-## 4. What Was Integrated (Architecture View)
+Current structure:
+- encode_page delegates to dedicated helpers:
+- scalar32 helper for INT32,
+- split32 helper for INT64,
+- shared upload helper for host->device encoded blob transfer.
 
-### 4.1 API and encoding surface
+### 3.3 Writer/runtime gating
 
-- Added custom encodings in cuDF IO metadata API:
-  - `FASTLANES_BITPACK`
-  - `FASTLANES_DELTA_BINARY` *
-- File: `cpp/include/cudf/io/types.hpp`
+Files:
+- cpp/src/io/parquet/writer_impl.cu
+- cpp/src/io/parquet/page_enc.cu
 
-Meaning:
+Current behavior:
+- schema-side and runtime-side checks are explicit and readable,
+- logical allowlist/fallback behavior remains unchanged,
+- unsupported logical types still fall back from requested FastLanes to safe alternatives.
 
-- caller can request FastLanes encoding through `column_in_metadata::set_encoding()`.
+## 4. Header and Metadata Contract
 
-### 4.2 FastLanes core components in cuDF tree
+File:
+- cpp/include/cudf/fastlanes/common.cuh
 
-Added FastLanes core headers and implementation glue:
+Important layout enums:
+- SCALAR32
+- SPLIT32
+- NATIVE64 (reserved)
 
-- `cpp/include/cudf/fastlanes/common.cuh`
-- `cpp/include/cudf/fastlanes/fastlanes_encode.cuh`
-- `cpp/include/cudf/fastlanes/fastlanes_decode.cuh`
-- `cpp/include/cudf/fastlanes/debug.hpp`
-- `cpp/include/cudf/fastlanes/fls_gen/*`
-- `cpp/src/fastlanes/fastlanes.cu`
-- `cpp/src/fastlanes/pack.cpp`
-- `cpp/src/fastlanes/transpose.cpp`
-- `cpp/src/fastlanes/unrsum.cpp`
+Current validation for INT64 physical pages accepts SPLIT32 only.
 
-Meaning:
+## 5. Test Organization (Updated)
 
-- FastLanes-generated pack/unpack and page-header logic are now available inside cuDF build.
+File:
+- cpp/tests/io/parquet_fastlanes_test.cpp
 
-### 4.3 Writer path integration
+The test file now has explicit grouping comments to make intent clear:
 
-Main writer hooks:
+1. INT32 baseline and edge-path roundtrip
+2. INT32 diagnostics (high bitwidth, tail pages)
+3. Header metadata validity (scalar32 and split32)
+4. INT32 logical-type force-enable coverage
+5. INT64/UINT64 split32 data-path coverage
+6. INT32 logical support/fallback matrix
+7. Mixed-encoding workload-pattern regression
 
-- `cpp/src/io/parquet/writer_impl.cu`
-  - validates requested encoding and currently enforces `FASTLANES_BITPACK` on INT32 columns only
-- `cpp/src/io/parquet/page_enc.cu`
-  - maps requested encoding to FastLanes kernel mask
-  - adds reservation logic for FastLanes tail pages
-  - includes pre-encoded page-copy path for FastLanes payloads
+Naming hints:
+- ForcedBitpack: FastLanes was explicitly requested
+- Fallback: FastLanes request should be rejected and fallback used
+- BoundarySizes: vector boundary and tail-page coverage
 
-Key meaning of these changes:
+## 6. Native64 Future Work: Exact Modification Points
 
-- FastLanes payload is prepared per page and copied into parquet page buffer,
-- writer reserves a conservative max page size for FastLanes tail pages to avoid under-allocation,
-- behavior is fail-fast instead of per-page mixed fallback when constraints are violated.
+When introducing a real native 64-bit FastLanes path, start at these locations:
 
-### 4.4 Reader path integration
+### 6.1 Header validation and size accounting
 
-Reader hooks:
+File:
+- cpp/include/cudf/fastlanes/common.cuh
 
-- `cpp/src/io/parquet/page_hdr.cu`
-  - maps `Encoding::FASTLANES_BITPACK` to dedicated decode kernel mask
-- `cpp/src/io/parquet/reader_impl.cpp`
-  - launches `decode_fastlanes_binary` + debug path when FastLanes pages are present
-- `cpp/src/io/parquet/page_fastlanes_decode.cu`
-  - dedicated FastLanes decode kernel
+Update:
+- is_valid_for_physical(...): allow and validate NATIVE64 for INT64 physical pages.
+- expected_body_size_bytes(): add NATIVE64 body-size computation.
 
-Key meaning of decode changes:
+### 6.2 Encoder dispatch
 
-- one warp per page decode model,
-- strict checks for unsupported shapes (nested/list/null pages),
-- payload staging into aligned shared-memory words before unpack (mitigates mixed-column misalignment cases where payload pointer may be unaligned).
+File:
+- cpp/include/cudf/fastlanes/fastlanes_encode.cuh
 
-## 5. Critical Trade-offs That Were Chosen
+Update:
+- encode_page(...): add branch to encode_native64_page(...).
+- keep encode_split32_page(...) for backward compatibility or gated fallback.
+- add native64 serialization metadata in header.
 
-### 5.1 Strict shape constraints
+### 6.3 Decoder dispatch and kernel
 
-Chosen for initial reliability and implementation speed:
+File:
+- cpp/src/io/parquet/page_fastlanes_decode.cu
 
-- no list/nested/null-heavy generalized FastLanes decode in first pass,
-- reject unsupported pages instead of silently producing partial behavior.
+Update:
+- add native64 decode kernel path,
+- dispatch INT64 pages by header layout mode (split32 vs native64),
+- keep split32 path for existing data files.
 
-Trade-off:
+### 6.4 Page-size reservation logic
 
-- simpler and safer kernel path now,
-- broader schema coverage postponed.
+File:
+- cpp/src/io/parquet/page_enc.cu
 
-### 5.2 INT32-first strategy
+Update:
+- revise reservation from two-component split assumption to layout-based stream accounting,
+- preserve conservative bounds during transition.
 
-Even though some code paths touched INT64 experiments, production path remains INT32-centric.
+## 7. Build and Validation Workflow (Remote)
 
-Why:
+Required environment in remote shell:
 
-- upstream FastLanes GPU unpack is hardwired around 32-bit generated kernels,
-- extending to 64-bit is not a simple `uint32_t -> uint64_t` replacement.
+- CUDF_HOME=/home/qchen/GPUFileFormat-cudf
+- conda activate cudf_dev
+- export CPATH="$CONDA_PREFIX/include/rapids:$CONDA_PREFIX/include"
 
-Trade-off:
+Build command:
 
-- predictable progress for INT32 workloads,
-- INT64 remains future work.
+- ${CUDF_HOME}/build.sh libcudf tests
 
-### 5.3 FOR normalization for negative INT32
+Focused validation target:
 
-Problem observed:
+- ./cpp/build/gtests/PARQUET_FASTLANES_TEST
+- ctest --test-dir cpp/build -R PARQUET_FASTLANES_TEST --output-on-failure
 
-- direct int32->uint32 reinterpret on negative values can force 32-bit bitwidth,
-- then encoded body is not smaller and header overhead can make page larger.
+## 8. Current Practical Status
 
-Chosen solution:
+- INT32 path: stable for the current logical allowlist.
+- INT64/UINT64 path: split32 implementation is active and tested.
+- Test suite for PARQUET_FASTLANES_TEST: currently green in direct run and ctest in this environment.
+- Native64 layout: not yet implemented; extension points are now documented in code.
 
-- page-local FOR (store deltas from page min),
-- keep `min_value` in FastLanes page header,
-- reconstruct during decode.
+## 9. Recommended Next Steps
 
-Trade-off:
-
-- fixes common negative-value edge cases,
-- still does not eliminate all mixed-schema corner cases.
-
-### 5.4 No per-page fallback mixing in same chunk (for now)
-
-Not implemented in this phase.
-
-Trade-off:
-
-- lower complexity and cleaner invariants,
-- fewer rescue paths for pathological pages.
-
-## 6. File-Level Handover Map (What to Read First)
-
-### 6.1 Encoding API and metadata surface
-
-- `cpp/include/cudf/io/types.hpp`
-  - `column_encoding` includes FastLanes entries.
-
-### 6.2 FastLanes implementation internals
-
-- `cpp/include/cudf/fastlanes/common.cuh`
-  - FastLanes page header, cast mode, min-value metadata.
-- `cpp/include/cudf/fastlanes/fastlanes_encode.cuh`
-  - host/device transfer + page normalization + bitwidth selection + serialization.
-- `cpp/include/cudf/fastlanes/debug.hpp`
-  - debug structures and dump helpers.
-- `cpp/include/cudf/fastlanes/IMPLEMENTATION_NOTES.md`
-  - assumptions and boundary decisions.
-
-### 6.3 Parquet writer integration
-
-- `cpp/src/io/parquet/writer_impl.cu`
-  - request validation and current datatype gating.
-- `cpp/src/io/parquet/page_enc.cu`
-  - kernel mask routing, page sizing reservation, and page copy path.
-
-### 6.4 Parquet reader integration
-
-- `cpp/src/io/parquet/page_hdr.cu`
-  - decode kernel mask mapping.
-- `cpp/src/io/parquet/reader_impl.cpp`
-  - decode launch orchestration.
-- `cpp/src/io/parquet/page_fastlanes_decode.cu`
-  - FastLanes decode kernel and aligned payload staging.
-
-### 6.5 Test and reproducibility tooling
-
-- `cpp/tests/io/parquet_fastlanes_test.cpp`
-  - focused FastLanes regression and edge cases.
-- `cpp/examples/parquet_io/fastlane_*`
-  - sanity/verification examples.
-- `cpp/examples/parquet_io/tools/roundtrip/parquet_io_roundtrip_check.py`
-  - c++ chunked rewrite + validation driver.
-- `cpp/examples/parquet_io/tools/search/search_best_parquet_encoding.py`
-  - reproducible encoding-combination search.
-
-## 7. Reproduction Guide
-
-Run from repo root unless stated.
-
-### 7.1 Build and tests
-
-```bash
-cd $CUDF_HOME
-./build.sh
-./build.sh libcudf tests
-ctest --test-dir ${CUDF_HOME}/cpp/build -R PARQUET_TEST
-```
-
-FastLanes runtime-linking note for this repo layout:
-
-- `PARQUET_FASTLANES_TEST` may resolve `libcudf.so` from conda env instead of `cpp/build`.
-- For validating local source edits before install, run with preload:
-
-```bash
-export LD_PRELOAD=$CUDF_HOME/cpp/build/libcudf.so:$CUDF_HOME/cpp/build/libcudftest_default_stream.so
-./cpp/build/gtests/PARQUET_FASTLANES_TEST
-```
-
-### 7.2 FastLanes benchmark smoke
-
-```bash
-cd $CUDF_HOME/cpp/examples/parquet_io
-../build.sh
-./build/fastlanes_bench_delta
-./build/fastlanes_bench_bitpack
-```
-
-### 7.3 Roundtrip validation with chunked C++ path
-
-```bash
-cd $CUDF_HOME/cpp/examples/parquet_io
-python3 ./tools/roundtrip/parquet_io_roundtrip_check.py \
-  --input CUDF-0003.parquet \
-  --conversion-engine cpp \
-  --cpp-binary ./build/parquet_io_chunk \
-  --validator auto \
-  --keep-output \
-  --cpp-enable-log \
-  --encoding-spec "l_orderkey:DELTA_BINARY_PACKED,\
-l_partkey:DELTA_BINARY_PACKED,\
-l_suppkey:DELTA_BINARY_PACKED,\
-l_linenumber:DICTIONARY,\
-l_quantity:DICTIONARY,\
-l_extendedprice:DELTA_BINARY_PACKED,\
-l_discount:DICTIONARY,\
-l_tax:DICTIONARY,\
-l_returnflag:FASTLANES_BITPACK,\
-l_linestatus:FASTLANES_BITPACK,\
-l_shipdate:DICTIONARY,\
-l_commitdate:DICTIONARY,\
-l_receiptdate:DELTA_BINARY_PACKED,\
-l_shipinstruct:FASTLANES_BITPACK,\
-l_shipmode:FASTLANES_BITPACK,\
-l_comment:DICTIONARY"
-```
-
-### 7.4 TPCH100 encoding search (reproducible)
-
-```bash
-cd $CUDF_HOME/cpp/examples/parquet_io
-python3 ./tools/search/search_best_parquet_encoding.py \
-  --input CUDF-0003.roundtrip.parquet \
-  --binary ./build/parquet_io_chunk \
-  --work-dir ./reports/fastlanes/encoding_search_tpch100 \
-  --compressions NONE,SNAPPY,ZSTD \
-  --batch-size 2 \
-  --search-scope fastlane-eligible \
-  --max-iterations 2 \
-  --search-skip-validation \
-  --validate-best
-```
-
-Expected output artifacts:
-
-- `cpp/examples/parquet_io/reports/fastlanes/encoding_search_tpch100/search_summary.md`
-- `cpp/examples/parquet_io/reports/fastlanes/encoding_search_tpch100/search_summary.json`
-
-## 8. Result Snapshot (Current)
-
-From current reproducible search artifacts:
-
-- best compression: `ZSTD`
-- final validated size: around `9.12 GB`
-- best FastLanes subset map in this run:
-  - `l_returnflag: DICTIONARY`
-  - `l_linestatus: DICTIONARY`
-  - `l_shipinstruct: FASTLANES_BITPACK`
-  - `l_shipmode: FASTLANES_BITPACK`
-
-Interpretation:
-
-- FastLanes can help selected low-cardinality INT32 columns,
-- not all candidate columns benefit from FastLanes in mixed-schema TPCH workloads.
-
-## 9. Known Gaps and Open Issues
-
-### 9.1 Mixed-schema and mixed-encoding corner cases
-
-Misalignment-class issues were partially mitigated by aligned staging, but broader stress coverage is still needed.
-
-### 9.2 Logical INT32 coverage (Date32 etc.)
-
-Current matrix is intentionally scoped:
-
-- enabled now (INT32 physical): `INT8`, `UINT8`, `INT16`, `UINT16`, `INT32`, `UINT32`, `Date32`, `Decimal32`, `TimeMillis(duration_ms, duration_s)`
-- unsupported but INT32 physical: `TimeMillis(duration_D)`
-- legacy UINT cast mode (`cast_mode=0`) is treated as unsupported during decode
-- fallback now: `Duration(us/ns)` and `TimeMillis(other scaled forms / negative-value semantics outside current validation scope)`
-
-Test-backed verification anchor:
-
-- `ParquetCpuEncoderTest.FastLanesInt32PhysicalLogicalTypeSupportMatrix`
-- `ParquetCpuEncoderTest.FastLanesInt32PhysicalLogicalTypeUnsupportedMatrix`
-
-Reason: keep decode/write semantics safe while retaining deterministic fallback for unsupported
-logical classes.
-
-### 9.3 INT64 support
-
-INT64 support (discussed in issue `[CUDA Kernel] fastlane只能uint32, 思考简单扩展到64bit`) is not a quick patch. The generated unpack kernels are hardwired around 32-bit patterns and magic constants, so a proper extension requires deeper kernel-generation work.
-
-### 9.4 Performance benchmark maturity
-
-The pipeline is functionally stronger than before, but end-to-end benchmark coverage on broader real datasets is still incomplete and should follow after edge-case hardening.
-
-## 10. Extension Playbook for Next Engineer
-
-### 10.1 Add more logical INT32 types (recommended next step)
-
-1. Add explicit negative-value semantic coverage for TimeMillis(duration_s) before broadening that scope.
-2. Add guarded support for additional TimeMillis scaled forms only after semantic tests pass.
-3. Keep strict fallback for any logical class without proven roundtrip/statistics correctness.
-4. Re-run TPCH search to measure net gain/loss after any eligibility expansion.
-
-### 10.2 INT64 integration (separate topic)
-
-Do not treat as a small patch.
-
-Recommended plan:
-
-1. Confirm required FastLanes kernel generation strategy for 64-bit unpack.
-2. Avoid metadata spoofing tricks that can break value-count/statistics/physical-type contracts.
-3. Introduce isolated prototype path first, then add parquet metadata correctness tests.
-4. Only merge after deterministic roundtrip + stats correctness are proven.
-
-## 11. Quick Reading Order for Handover
-
-1. `cpp/include/cudf/fastlanes/IMPLEMENTATION_NOTES.md`
-2. `cpp/src/io/parquet/writer_impl.cu`
-3. `cpp/src/io/parquet/page_enc.cu`
-4. `cpp/src/io/parquet/page_hdr.cu`
-5. `cpp/src/io/parquet/reader_impl.cpp`
-6. `cpp/src/io/parquet/page_fastlanes_decode.cu`
-7. `cpp/tests/io/parquet_fastlanes_test.cpp`
-8. `cpp/examples/parquet_io/tools/roundtrip/parquet_io_roundtrip_check.py`
-9. `cpp/examples/parquet_io/tools/search/search_best_parquet_encoding.py`
-
-## 12. Related Documents
-
-- FastLanes method doc:
-  - `cpp/examples/parquet_io/docs/fastlanes/ENCODING_SEARCH_METHOD.md`
-- nvComp handover doc (same style):
-  - `cpp/examples/parquet_io/docs/nvcomp/NVCOMP_BRANCH_BASE_ANALYSIS_2026-03-28.md`
+1. Keep split32 as default while native64 is prototyped behind explicit layout handling.
+2. Add native64-specific tests without removing split32 coverage.
+3. Keep compatibility read support for split32 pages even after native64 write path lands.
+4. Run mixed-encoding regression and matrix tests after each metadata contract change.
