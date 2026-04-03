@@ -1736,7 +1736,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesInt32PhysicalLogicalTypeSupportMatrix)
     4096);
 }
 
-TEST_F(ParquetCpuEncoderTest, FastLanesInt32PhysicalLogicalTypeUnsupportedMatrix)
+TEST_F(ParquetCpuEncoderTest, FastLanesInt32PhysicalLogicalTypeDurationDaysSupportedMatrix)
 {
   auto const expected_physical = cudf::io::parquet::Type::INT32;
   auto const fastlanes_encoding = cudf::io::parquet::Encoding::FASTLANES_BITPACK;
@@ -1746,18 +1746,75 @@ TEST_F(ParquetCpuEncoderTest, FastLanesInt32PhysicalLogicalTypeUnsupportedMatrix
     duration_day_values[i] = static_cast<cudf::duration_D::rep>((i % 4000) - 2000);
   }
 
-  // duration_D writes as INT32 physical with TIME_MILLIS annotation, but is intentionally
-  // not in the current FastLanes logical allowlist.
+  // duration_D writes as INT32 physical with TIME_MILLIS annotation and should be eligible
+  // for FastLanes encoding.
   write_single_column_typed_expect_physical_and_encoding<cudf::duration_D>(
     duration_day_values,
-    "test_fastlanes_matrix_unsupported_duration_day.parquet",
+    "test_fastlanes_matrix_support_duration_day.parquet",
     expected_physical,
     fastlanes_encoding,
-    false,
+    true,
     false,
     9,
     1024,
     4096);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesDurationDaysLogicalTypeForcedBitpackNegative)
+{
+  constexpr int num_rows = 2051;
+  std::vector<cudf::duration_D::rep> input_days(num_rows);
+  std::vector<cudf::duration_ms::rep> expected_millis(num_rows);
+
+  auto const expected_time_millis_from_days = [](cudf::duration_D::rep days) {
+    auto const scaled = static_cast<int64_t>(days) * 86400000LL;
+    return static_cast<cudf::duration_ms::rep>(static_cast<int32_t>(scaled));
+  };
+
+  for (int i = 0; i < num_rows; ++i) {
+    auto const days    = static_cast<cudf::duration_D::rep>((i % 2048) - 1024);
+    input_days[i]      = days;
+    expected_millis[i] = expected_time_millis_from_days(days);
+  }
+
+  input_days[0]            = static_cast<cudf::duration_D::rep>(-1);
+  input_days[1]            = static_cast<cudf::duration_D::rep>(0);
+  input_days[2]            = static_cast<cudf::duration_D::rep>(1);
+  input_days[num_rows - 1] = static_cast<cudf::duration_D::rep>(-36500);
+
+  expected_millis[0]            = expected_time_millis_from_days(input_days[0]);
+  expected_millis[1]            = expected_time_millis_from_days(input_days[1]);
+  expected_millis[2]            = expected_time_millis_from_days(input_days[2]);
+  expected_millis[num_rows - 1] = expected_time_millis_from_days(input_days[num_rows - 1]);
+
+  cudf::test::fixed_width_column_wrapper<cudf::duration_D, cudf::duration_D::rep> input_col(
+    input_days.begin(), input_days.end());
+  cudf::table_view input({input_col});
+
+  cudf::io::table_input_metadata metadata(input);
+  metadata.column_metadata[0].set_name("time_millis_days_col_negative");
+  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+
+  auto const filepath = "test_fastlanes_duration_d_negative_forced_bitpack_roundtrip.parquet";
+  auto cleanup        = [&]() { std::remove(filepath); };
+
+  auto builder = cudf::io::parquet_writer_options::builder(cudf::io::sink_info{filepath}, input)
+                   .metadata(metadata)
+                   .write_v2_headers(true)
+                   .max_page_size_rows(1024)
+                   .max_page_size_bytes(4096);
+  cudf::io::write_parquet(builder);
+
+  expect_first_data_page_encoding(filepath, cudf::io::parquet::Encoding::FASTLANES_BITPACK);
+
+  auto in_opts = cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath});
+  auto result  = cudf::io::read_parquet(in_opts);
+
+  cudf::test::fixed_width_column_wrapper<cudf::duration_ms, cudf::duration_ms::rep> expected_col(
+    expected_millis.begin(), expected_millis.end());
+  CUDF_TEST_EXPECT_COLUMNS_EQUAL(expected_col, result.tbl->view().column(0));
+
+  cleanup();
 }
 
 TEST_F(ParquetCpuEncoderTest, FastLanesDurationMicrosecondsLogicalTypeFallsBackFromFastLanes)

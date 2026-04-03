@@ -87,6 +87,7 @@ constexpr bool is_int32_fastlanes_leaf_allowlist(cudf::type_id leaf_type)
     case cudf::type_id::TIMESTAMP_DAYS:
     case cudf::type_id::DECIMAL32:
     case cudf::type_id::DURATION_SECONDS:
+    case cudf::type_id::DURATION_DAYS:
     case cudf::type_id::DURATION_MILLISECONDS: return true;
     default: return false;
   }
@@ -149,7 +150,8 @@ bool is_fastlanes_int32_schema_supported(cudf::type_id leaf_type,
 
     if (logical.is_time_millis()) {
       return leaf_type == cudf::type_id::DURATION_MILLISECONDS ||
-             leaf_type == cudf::type_id::DURATION_SECONDS;
+             leaf_type == cudf::type_id::DURATION_SECONDS ||
+             leaf_type == cudf::type_id::DURATION_DAYS;
     }
   }
 
@@ -165,7 +167,8 @@ bool is_fastlanes_int32_schema_supported(cudf::type_id leaf_type,
       case ConvertedType::DECIMAL: return leaf_type == cudf::type_id::DECIMAL32;
       case ConvertedType::TIME_MILLIS:
         return leaf_type == cudf::type_id::DURATION_MILLISECONDS ||
-               leaf_type == cudf::type_id::DURATION_SECONDS;
+               leaf_type == cudf::type_id::DURATION_SECONDS ||
+               leaf_type == cudf::type_id::DURATION_DAYS;
       default: break;
     }
   }

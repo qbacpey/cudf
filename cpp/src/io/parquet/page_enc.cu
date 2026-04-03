@@ -520,6 +520,7 @@ CUDF_HOST_DEVICE constexpr bool is_fastlanes_bitpack_supported_logical(Type phys
     case cudf::type_id::TIMESTAMP_DAYS:
     case cudf::type_id::DECIMAL32:
     case cudf::type_id::DURATION_SECONDS:
+    case cudf::type_id::DURATION_DAYS:
     case cudf::type_id::DURATION_MILLISECONDS: return true;
     default: return false;
   }

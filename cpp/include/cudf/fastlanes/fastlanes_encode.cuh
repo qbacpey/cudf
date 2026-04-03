@@ -344,15 +344,6 @@ class FastLanesEncoder {
     }
 
     page.bitwidth = compute_bitwidth(page.values.data(), count);
-    if constexpr (std::is_same_v<T, int32_t>) {
-      if (page.bitwidth == TYPE_BITS) {
-        // Trade-off: the intended datasets are expected to compress after page-local
-        // normalization. Rather than introducing per-page fallback machinery in the write path,
-        // reject pages that still need 32 bits and let the caller fail fast.
-        throw std::invalid_argument(
-          "FastLanesEncoder<int32_t>: normalized page still requires 32-bit width");
-      }
-    }
 
     if (!fastlanes::is_valid_bitwidth(page.bitwidth)) {
       // Trade-off: the intended datasets are expected to compress after page-local normalization.
