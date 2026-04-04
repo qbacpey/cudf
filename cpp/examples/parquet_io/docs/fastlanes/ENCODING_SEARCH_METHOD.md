@@ -54,12 +54,18 @@ This makes the same workflow automatically test those columns as well.
 
 Run from cpp/examples/parquet_io on the GPU host.
 
+Recommended environment before running:
+
+- `export CUDF_HOME=/home/qchen/04_GPUFileFormat-cudf/<worktree>`
+- `export PARQUET_IO_SHARED_ROOT=/home/qchen/04_GPUFileFormat-cudf/parquet_io_shared`
+- `export WT=$(basename "$CUDF_HOME")`
+
 1) Full search (fastlane-eligible columns only, all 3 compressions):
 
 python3 ./tools/search/search_best_parquet_encoding.py \
   --input CUDF-0003.roundtrip.parquet \
   --binary ./build/parquet_io_chunk \
-  --work-dir ./artifacts/fastlanes/encoding_search_tpch100/run_<timestamp>/03_raw \
+  --work-dir "${PARQUET_IO_SHARED_ROOT}/artifacts/${WT}/fastlanes/encoding_search_tpch100/run_YYYYMMDD_HHMMSS/03_raw" \
   --compressions NONE,SNAPPY,ZSTD \
   --batch-size 2 \
   --search-scope fastlane-eligible \
@@ -72,7 +78,7 @@ python3 ./tools/search/search_best_parquet_encoding.py \
 python3 ./tools/search/search_best_parquet_encoding.py \
   --input CUDF-0003.roundtrip.parquet \
   --binary ./build/parquet_io_chunk \
-  --work-dir ./artifacts/fastlanes/encoding_search_tpch100_future/run_<timestamp>/03_raw \
+  --work-dir "${PARQUET_IO_SHARED_ROOT}/artifacts/${WT}/fastlanes/encoding_search_tpch100_future/run_YYYYMMDD_HHMMSS/03_raw" \
   --compressions NONE,SNAPPY,ZSTD \
   --batch-size 2 \
   --search-scope all \
@@ -83,7 +89,8 @@ python3 ./tools/search/search_best_parquet_encoding.py \
 
 ## Outputs
 
-For each run, the script writes under --work-dir (recommended under `03_raw`):
+For each run, the script writes under --work-dir (recommended under shared
+`artifacts/.../03_raw`):
 
 - search_summary.json: machine-readable result
 - search_summary.md: human summary + reproduction command

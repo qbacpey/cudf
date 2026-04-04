@@ -18,24 +18,6 @@
 namespace cudf::io::parquet::detail::fastlanes_cudf {
 
 // =============================================================================
-// Debug Utilities — Delegates to centralized fastlanes::debug (debug.hpp)
-// =============================================================================
-
-/// @deprecated Use fastlanes::debug::print_encoded_dump() directly.
-template <typename T>
-void print_encoded_dump(const T* data, size_t count, const char* label = "Encoded Dump")
-{
-  fastlanes::debug::print_encoded_dump(data, count, label);
-}
-
-/// @deprecated Use fastlanes::debug::print_encoded_dump() directly.
-template <typename T>
-void print_encoded_dump(const std::vector<T>& data, const char* label = "Encoded Dump")
-{
-  fastlanes::debug::print_encoded_dump(data, label);
-}
-
-// =============================================================================
 // FastLanes Encoder Result
 // =============================================================================
 
@@ -488,16 +470,6 @@ class FastLanesEncoder {
     }
   }
 
-  /// @deprecated Replaced by fastlanes::debug::print_encoder_summary()
-  void print_debug_info(uint32_t count,
-                        uint64_t padded,
-                        uint8_t bitwidth,
-                        fastlanes::TypeCastMode cast_mode,
-                        const T* data)
-  {
-    fastlanes::debug::print_encoder_summary(std::cout, count, padded, bitwidth, cast_mode, data);
-  }
-
   uint8_t compute_bitwidth(const UnsignedT* data, uint32_t count)
   {
     UnsignedT max_val = 0;
@@ -541,4 +513,4 @@ using FastLanesInt32Encoder  = FastLanesEncoder<int32_t>;
 using FastLanesInt64Encoder  = FastLanesEncoder<int64_t>;
 // using FastLanesUInt64Encoder = FastLanesEncoder<uint64_t>;
 
-}  // namespace cudf::io::parquet::detail
+}  // namespace cudf::io::parquet::detail::fastlanes_cudf

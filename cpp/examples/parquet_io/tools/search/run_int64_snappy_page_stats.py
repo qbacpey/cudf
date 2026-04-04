@@ -28,7 +28,7 @@ Usage example:
     python3 ./tools/search/run_int64_snappy_page_stats.py \
         --input ./CUDF-0003.roundtrip.parquet \
         --cpp-binary ./build/parquet_io_chunk \
-        --output-dir ./artifacts/fastlanes/snappy_int64_page_stats
+        --output-dir ${PARQUET_IO_SHARED_ROOT}/artifacts/${WORKTREE}/fastlanes/snappy_int64_page_stats
 """
 
 from __future__ import annotations
@@ -46,10 +46,32 @@ from pathlib import Path
 from typing import Dict, List
 
 THIS_DIR = Path(__file__).resolve().parent
+REPO_ROOT = THIS_DIR.parents[5]
 if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
 
 from search_best_parquet_encoding import _default_map, _load_columns  # noqa: E402
+
+
+def _resolve_worktree_name() -> str:
+    cudf_home = os.environ.get("CUDF_HOME", "").strip()
+    if cudf_home:
+        return Path(cudf_home).name
+    return REPO_ROOT.name
+
+
+def _default_output_dir() -> str:
+    shared_root = os.environ.get("PARQUET_IO_SHARED_ROOT", "").strip()
+    if not shared_root:
+        return "./artifacts/fastlanes/snappy_int64_page_stats"
+
+    return str(
+        Path(shared_root).expanduser()
+        / "artifacts"
+        / _resolve_worktree_name()
+        / "fastlanes"
+        / "snappy_int64_page_stats"
+    )
 
 
 @dataclass
@@ -99,10 +121,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--output-dir",
-        default="./artifacts/fastlanes/snappy_int64_page_stats",
+        default=_default_output_dir(),
         help=(
             "Base directory for run_* folders using layered artifacts "
-            "(01_human, 02_machine, 03_raw)"
+            "(01_human, 02_machine, 03_raw). Uses PARQUET_IO_SHARED_ROOT when set."
         ),
     )
     p.add_argument(

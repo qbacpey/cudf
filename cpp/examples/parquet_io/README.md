@@ -20,16 +20,16 @@ The goal of this README is to make each script easy to understand:
   - `tools/search/`: search and page-level analytics helpers
 - `docs/`
   - human-facing documentation and workflow notes
-- `artifacts/`
-  - new layered output location for generated data
-  - see "Layered Artifact Convention" below
-- `reports/`
-  - legacy generated outputs from older runs (kept for compatibility)
-  - see `reports/README.md` for policy
+
+Generated outputs are external-only and should be written under:
+
+- `${PARQUET_IO_SHARED_ROOT}/artifacts/<worktree>/...`
+- `${PARQUET_IO_SHARED_ROOT}/reports/<worktree>/...`
 
 ## Layered Artifact Convention
 
-For all new generated runs, use a 3-layer layout under `artifacts/`:
+For all new generated runs, use a 3-layer layout under
+`${PARQUET_IO_SHARED_ROOT}/artifacts/<worktree>/`:
 
 - `01_human/`
   - concise human-readable outputs
@@ -44,7 +44,7 @@ For all new generated runs, use a 3-layer layout under `artifacts/`:
 Example run directory:
 
 ```text
-artifacts/fastlanes/snappy_int64_page_stats/run_YYYYMMDD_HHMMSS/
+${PARQUET_IO_SHARED_ROOT}/artifacts/<worktree>/fastlanes/snappy_int64_page_stats/run_YYYYMMDD_HHMMSS/
   01_human/
     run_summary.md
     r_report/
@@ -141,16 +141,17 @@ Run from `cpp/examples/parquet_io`:
 ```bash
 python3 ./tools/search/run_int64_snappy_page_stats.py \
   --input <input.parquet> \
-  --cpp-binary ./build/parquet_io_chunk
+  --cpp-binary ./build/parquet_io_chunk \
+  --output-dir ${PARQUET_IO_SHARED_ROOT}/artifacts/$(basename ${CUDF_HOME})/fastlanes/snappy_int64_page_stats
 
 python3 ./tools/search/extract_fastlanes_page_stats.py \
-  --manifest-csv ./artifacts/fastlanes/snappy_int64_page_stats/run_<id>/03_raw/run_manifest.csv \
-  --machine-summary-json ./artifacts/fastlanes/snappy_int64_page_stats/run_<id>/02_machine/extract_summary.json
+  --manifest-csv ${PARQUET_IO_SHARED_ROOT}/artifacts/$(basename ${CUDF_HOME})/fastlanes/snappy_int64_page_stats/run_<id>/03_raw/run_manifest.csv \
+  --machine-summary-json ${PARQUET_IO_SHARED_ROOT}/artifacts/$(basename ${CUDF_HOME})/fastlanes/snappy_int64_page_stats/run_<id>/02_machine/extract_summary.json
 
 Rscript ./tools/search/plot_int64_fastlanes_page_stats.R \
-  --case-summary-csv ./artifacts/fastlanes/snappy_int64_page_stats/run_<id>/03_raw/case_summary.csv \
-  --page-stats-csv ./artifacts/fastlanes/snappy_int64_page_stats/run_<id>/03_raw/page_stats_int64_fastlanes.csv \
-  --output-dir ./artifacts/fastlanes/snappy_int64_page_stats/run_<id>/01_human/r_report
+  --case-summary-csv ${PARQUET_IO_SHARED_ROOT}/artifacts/$(basename ${CUDF_HOME})/fastlanes/snappy_int64_page_stats/run_<id>/03_raw/case_summary.csv \
+  --page-stats-csv ${PARQUET_IO_SHARED_ROOT}/artifacts/$(basename ${CUDF_HOME})/fastlanes/snappy_int64_page_stats/run_<id>/03_raw/page_stats_int64_fastlanes.csv \
+  --output-dir ${PARQUET_IO_SHARED_ROOT}/artifacts/$(basename ${CUDF_HOME})/fastlanes/snappy_int64_page_stats/run_<id>/01_human/r_report
 ```
 
 ## Authoring Rules

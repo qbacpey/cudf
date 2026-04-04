@@ -17,14 +17,15 @@ then exports a canonical CSV and plot report.
 1. Build `parquet_io_chunk` from `cpp/examples/parquet_io/build/parquet_io_chunk`.
 2. Debug env variables are set automatically by `run_int64_snappy_page_stats.py`.
 3. Run from `cpp/examples/parquet_io`.
+4. Set `CUDF_HOME`, `PARQUET_IO_SHARED_ROOT`, and `WT=$(basename "$CUDF_HOME")` in your remote shell.
 
 ## Layered Output Layout
 
 Each run is written under:
 
-- `artifacts/fastlanes/snappy_int64_page_stats/run_<timestamp>/01_human`
-- `artifacts/fastlanes/snappy_int64_page_stats/run_<timestamp>/02_machine`
-- `artifacts/fastlanes/snappy_int64_page_stats/run_<timestamp>/03_raw`
+- `${PARQUET_IO_SHARED_ROOT}/artifacts/${WT}/fastlanes/snappy_int64_page_stats/run_<timestamp>/01_human`
+- `${PARQUET_IO_SHARED_ROOT}/artifacts/${WT}/fastlanes/snappy_int64_page_stats/run_<timestamp>/02_machine`
+- `${PARQUET_IO_SHARED_ROOT}/artifacts/${WT}/fastlanes/snappy_int64_page_stats/run_<timestamp>/03_raw`
 
 Meaning:
 
@@ -38,7 +39,7 @@ Meaning:
 python3 ./tools/search/run_int64_snappy_page_stats.py \
   --input <input.parquet> \
   --cpp-binary ./build/parquet_io_chunk \
-  --output-dir ./artifacts/fastlanes/snappy_int64_page_stats \
+  --output-dir "${PARQUET_IO_SHARED_ROOT}/artifacts/${WT}/fastlanes/snappy_int64_page_stats" \
   --batch-size 2
 ```
 
@@ -56,8 +57,8 @@ Outputs under `run_<timestamp>/`:
 
 ```bash
 python3 ./tools/search/extract_fastlanes_page_stats.py \
-  --manifest-csv ./artifacts/fastlanes/snappy_int64_page_stats/run_<timestamp>/03_raw/run_manifest.csv \
-  --machine-summary-json ./artifacts/fastlanes/snappy_int64_page_stats/run_<timestamp>/02_machine/extract_summary.json
+  --manifest-csv "${PARQUET_IO_SHARED_ROOT}/artifacts/${WT}/fastlanes/snappy_int64_page_stats/run_<timestamp>/03_raw/run_manifest.csv" \
+  --machine-summary-json "${PARQUET_IO_SHARED_ROOT}/artifacts/${WT}/fastlanes/snappy_int64_page_stats/run_<timestamp>/02_machine/extract_summary.json"
 ```
 
 Default output:
@@ -76,9 +77,9 @@ Core schema columns include:
 
 ```bash
 Rscript ./tools/search/plot_int64_fastlanes_page_stats.R \
-  --case-summary-csv ./artifacts/fastlanes/snappy_int64_page_stats/run_<timestamp>/03_raw/case_summary.csv \
-  --page-stats-csv ./artifacts/fastlanes/snappy_int64_page_stats/run_<timestamp>/03_raw/page_stats_int64_fastlanes.csv \
-  --output-dir ./artifacts/fastlanes/snappy_int64_page_stats/run_<timestamp>/01_human/r_report
+  --case-summary-csv "${PARQUET_IO_SHARED_ROOT}/artifacts/${WT}/fastlanes/snappy_int64_page_stats/run_<timestamp>/03_raw/case_summary.csv" \
+  --page-stats-csv "${PARQUET_IO_SHARED_ROOT}/artifacts/${WT}/fastlanes/snappy_int64_page_stats/run_<timestamp>/03_raw/page_stats_int64_fastlanes.csv" \
+  --output-dir "${PARQUET_IO_SHARED_ROOT}/artifacts/${WT}/fastlanes/snappy_int64_page_stats/run_<timestamp>/01_human/r_report"
 ```
 
 Generated assets:

@@ -82,9 +82,11 @@ For this dataset and fixed encoding map:
 ## Repro Notes
 
 All runs were executed on remote GPU server `qchen@fng01` with:
-- `CUDF_HOME=/home/qchen/GPUFileFormat-cudf`
+- `CUDF_HOME=/home/qchen/04_GPUFileFormat-cudf/GPUFileFormat-cudf`
+- `PARQUET_IO_SHARED_ROOT=/home/qchen/04_GPUFileFormat-cudf/parquet_io_shared`
+- `WT=$(basename "$CUDF_HOME")`
 - `conda activate cudf_dev`
 - roundtrip tool: `cpp/examples/parquet_io/tools/roundtrip/parquet_io_roundtrip_check.py`
 
 Output artifacts are under:
-- `cpp/examples/parquet_io/reports/fastlanes/snappy_int64_delta_vs_fastlanes/`
+- `${PARQUET_IO_SHARED_ROOT}/reports/${WT}/fastlanes/snappy_int64_delta_vs_fastlanes/`

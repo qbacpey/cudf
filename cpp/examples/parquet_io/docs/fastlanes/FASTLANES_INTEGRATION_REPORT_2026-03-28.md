@@ -143,7 +143,7 @@ Update:
 
 Required environment in remote shell:
 
-- CUDF_HOME=/home/qchen/GPUFileFormat-cudf
+- CUDF_HOME=/home/qchen/04_GPUFileFormat-cudf/GPUFileFormat-cudf
 - conda activate cudf_dev
 - export CPATH="$CONDA_PREFIX/include/rapids:$CONDA_PREFIX/include"
 

@@ -1,6 +1,0 @@
-=== STDOUT ===
-[1/2] Converting via chunked C++ backend: /home/qchen/GPUFileFormat-cudf/cpp/examples/parquet_io/build/parquet_io_chunk
-      encoding=l_orderkey:DELTA_BINARY_PACKED,l_partkey:DELTA_BINARY_PACKED,l_suppkey:DELTA_BINARY_PACKED,l_linenumber:DELTA_BINARY_PACKED,l_quantity:DELTA_BINARY_PACKED,l_extendedprice:DELTA_BINARY_PACKED,l_discount:FASTLANES_BITPACK,l_tax:DELTA_BINARY_PACKED,l_returnflag:FASTLANES_BITPACK,l_linestatus:FASTLANES_BITPACK,l_shipdate:FASTLANES_BITPACK,l_commitdate:FASTLANES_BITPACK,l_receiptdate:FASTLANES_BITPACK,l_shipinstruct:FASTLANES_BITPACK,l_shipmode:FASTLANES_BITPACK compression=SNAPPY batch_size=2
-      cpp_validation=enabled cpp_log_stream=off
-      convert_time=112230.23 ms
-PASS: cpp chunked conversion + cpp internal validation succeeded.

@@ -1,8 +1,0 @@
-{
-  "run_id": "20260402_120129",
-  "source": "migrated_from_reports_legacy_layout",
-  "notes": "This run predates the layered default output layout.",
-  "human_dir": "01_human",
-  "machine_dir": "02_machine",
-  "raw_dir": "03_raw"
-}

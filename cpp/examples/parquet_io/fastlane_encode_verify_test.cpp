@@ -21,16 +21,6 @@
 #include <vector>
 
 // =============================================================================
-// Dump Function: Uses centralized fastlanes::debug::print_encoded_dump
-// =============================================================================
-
-template <typename T>
-void print_encoded_dump(const std::vector<T>& body, const char* label)
-{
-  fastlanes::debug::print_encoded_dump(body, label);
-}
-
-// =============================================================================
 // Bitwidth Computation (Same logic as cudf encoder)
 // =============================================================================
 
@@ -129,7 +119,7 @@ void test_fastlanes_pack_direct(const std::vector<T>& original_data)
   }
 
   // 7. Dump encoded output (same format as cudf)
-  print_encoded_dump(encoded_output, "Direct Pack Encoded Stream");
+  fastlanes::debug::print_encoded_dump(encoded_output, "Direct Pack Encoded Stream");
 
   // 8. Show reinterpret_cast equivalence for positive values
   std::cout << "============================================\n";

@@ -5,11 +5,11 @@ This note summarizes one executed run and is intentionally concise.
 ## Data Source
 
 - Raw case table:
-  - `artifacts/fastlanes/snappy_int64_page_stats/run_20260402_120129/03_raw/case_summary.csv`
+  - `${PARQUET_IO_SHARED_ROOT}/artifacts/<worktree>/fastlanes/snappy_int64_page_stats/run_20260402_120129/03_raw/case_summary.csv`
 - Raw page table:
-  - `artifacts/fastlanes/snappy_int64_page_stats/run_20260402_120129/03_raw/page_stats_int64_fastlanes.csv`
+  - `${PARQUET_IO_SHARED_ROOT}/artifacts/<worktree>/fastlanes/snappy_int64_page_stats/run_20260402_120129/03_raw/page_stats_int64_fastlanes.csv`
 - Raw logs:
-  - `artifacts/fastlanes/snappy_int64_page_stats/run_20260402_120129/03_raw/logs/*.log`
+  - `${PARQUET_IO_SHARED_ROOT}/artifacts/<worktree>/fastlanes/snappy_int64_page_stats/run_20260402_120129/03_raw/logs/*.log`
 
 ## Key Results
 

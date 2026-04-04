@@ -80,6 +80,8 @@ build/
 cpp/build/
 cpp/examples/*/install/
 cpp/examples/*/build/
+cpp/examples/parquet_io/artifacts/
+cpp/examples/parquet_io/reports/
 cpp/include/cudf/ipc_generated/*.h
 cpp/thirdparty/googletest/
 

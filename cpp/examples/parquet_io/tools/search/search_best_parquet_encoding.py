@@ -32,7 +32,7 @@ Usage example:
     python3 ./tools/search/search_best_parquet_encoding.py \
         --input ./CUDF-0003.roundtrip.parquet \
         --binary ./build/parquet_io_chunk \
-        --work-dir ./artifacts/fastlanes/encoding_search_runs/run_<id>/03_raw
+        --work-dir ${PARQUET_IO_SHARED_ROOT}/artifacts/${WORKTREE}/fastlanes/encoding_search_runs/run_<id>/03_raw
 """
 
 from __future__ import annotations
@@ -57,6 +57,30 @@ except ImportError as exc:  # pragma: no cover
 
 UNCOMPRESSED_ALIASES = {"UNCOMPRESSED", "UNCOMPRESS", "NONE"}
 VALID_COMPRESSIONS = {"NONE", "SNAPPY", "ZSTD"}
+
+THIS_DIR = Path(__file__).resolve().parent
+REPO_ROOT = THIS_DIR.parents[5]
+
+
+def _resolve_worktree_name() -> str:
+    cudf_home = os.environ.get("CUDF_HOME", "").strip()
+    if cudf_home:
+        return Path(cudf_home).name
+    return REPO_ROOT.name
+
+
+def _default_work_dir() -> str:
+    shared_root = os.environ.get("PARQUET_IO_SHARED_ROOT", "").strip()
+    if not shared_root:
+        return "./artifacts/fastlanes/encoding_search_runs"
+
+    return str(
+        Path(shared_root).expanduser()
+        / "artifacts"
+        / _resolve_worktree_name()
+        / "fastlanes"
+        / "encoding_search_runs"
+    )
 
 
 @dataclass
@@ -306,8 +330,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--work-dir",
-        default="./artifacts/fastlanes/encoding_search_runs",
-        help="Directory for trial outputs/logs/results",
+        default=_default_work_dir(),
+        help="Directory for trial outputs/logs/results (uses PARQUET_IO_SHARED_ROOT when set)",
     )
     p.add_argument(
         "--compressions",

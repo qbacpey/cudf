@@ -10,6 +10,7 @@
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/fastlanes/common.cuh>
+#include <cudf/fastlanes/debug.hpp>
 #include <cudf/fastlanes/fastlanes_encode.cuh>
 #include <cudf/fastlanes/fls_gen/pack/pack.hpp>
 #include <cudf/io/parquet.hpp>
@@ -26,11 +27,6 @@
 #include <numeric>
 #include <random>
 #include <vector>
-
-// =============================================================================
-// Shared Dump Function: Imported from fastlanes_encode.cuh
-// =============================================================================
-// cudf::io::parquet::detail::fastlanes_cudf::print_encoded_dump is used directly.
 
 // =============================================================================
 // Bitwidth Computation (Same logic as cudf encoder)
@@ -234,7 +230,7 @@ bool run_one_page_test(const std::string& type_name, bool use_random = false)
 
   uint8_t direct_bitwidth;
   auto direct_encoded = direct_fastlanes_pack(host_data, direct_bitwidth);
-  cudf::io::parquet::detail::fastlanes_cudf::print_encoded_dump(
+  fastlanes::debug::print_encoded_dump(
     direct_encoded.data(), direct_encoded.size(), "Direct FastLanes Output");
 
   // ===================================================================

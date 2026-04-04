@@ -31,6 +31,7 @@ Example:
 """
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,6 +61,29 @@ from py_utils.file_utils import (
 from py_utils.logging_utils import ColoredLogger, Colors
 from py_utils.runner import ConversionResult, ParquetIORunner
 from py_utils.validation import ValidationResult, ValidationStatus, validate_parquet_files
+
+THIS_DIR = Path(__file__).resolve().parent
+REPO_ROOT = THIS_DIR.parents[5]
+
+
+def _resolve_worktree_name() -> str:
+    cudf_home = os.environ.get("CUDF_HOME", "").strip()
+    if cudf_home:
+        return Path(cudf_home).name
+    return REPO_ROOT.name
+
+
+def _default_output_parent() -> Optional[Path]:
+    shared_root = os.environ.get("PARQUET_IO_SHARED_ROOT", "").strip()
+    if not shared_root:
+        return None
+
+    return (
+        Path(shared_root).expanduser()
+        / "artifacts"
+        / _resolve_worktree_name()
+        / "roundtrip"
+    )
 
 
 @dataclass
@@ -150,7 +174,10 @@ Examples:
         "-o",
         type=Path,
         default=None,
-        help="Output directory (default: auto-generated with timestamp)",
+        help=(
+            "Output directory (default: auto-generated with timestamp; "
+            "uses PARQUET_IO_SHARED_ROOT when set)"
+        ),
     )
     
     parser.add_argument(
@@ -329,7 +356,10 @@ def main() -> int:
     
     # Setup output directory
     if config.output_dir is None:
-        config.output_dir = create_timestamped_dir("roundtrip_test")
+        config.output_dir = create_timestamped_dir(
+            "roundtrip_test",
+            parent=_default_output_parent(),
+        )
     else:
         config.output_dir.mkdir(parents=True, exist_ok=True)
     
