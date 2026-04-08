@@ -13,7 +13,7 @@ Validation backends:
 - cudf: strict in-memory cuDF dataframe comparison
 
 FastLanes note:
-- FASTLANES_BITPACK is currently signed-only for INT32 physical columns
+- FASTLANE_BITPACK_RAW is currently signed-only for INT32 physical columns
 - UINT logical types fall back to non-FastLanes encodings
 
 Example:
@@ -92,13 +92,13 @@ Example:
             l_extendedprice:DELTA_BINARY_PACKED,\
             l_discount:DICTIONARY,\
             l_tax:DICTIONARY,\
-            l_returnflag:FASTLANES_BITPACK,\
-            l_linestatus:FASTLANES_BITPACK,\
+            l_returnflag:FASTLANE_BITPACK_RAW,\
+            l_linestatus:FASTLANE_BITPACK_RAW,\
             l_shipdate:DICTIONARY,\
             l_commitdate:DICTIONARY,\
             l_receiptdate:DELTA_BINARY_PACKED,\
-            l_shipinstruct:FASTLANES_BITPACK,\
-            l_shipmode:FASTLANES_BITPACK,\
+            l_shipinstruct:FASTLANE_BITPACK_RAW,\
+            l_shipmode:FASTLANE_BITPACK_RAW,\
             l_comment:DICTIONARY"
 
 Input:
@@ -218,7 +218,7 @@ def parse_args() -> argparse.Namespace:
         default="DELTA_BINARY_PACKED",
         help=(
             "Encoding argument passed to parquet_io_chunk (default: DELTA_BINARY_PACKED). "
-            "FASTLANES_BITPACK currently applies to signed INT32 logical classes only."
+            "FASTLANE_BITPACK_RAW currently applies to signed INT32 logical classes only."
         ),
     )
     parser.add_argument(

@@ -27,8 +27,8 @@ Aggregate control:
 ## Caveats
 
 - Several cases include warnings:
-  - `FASTLANES_BITPACK encoding is unsupported for this logical type; the requested encoding will be ignored`
-- Therefore, not every requested FASTLANES mapping is guaranteed to be applied exactly as requested.
+  - `FASTLANE_BITPACK_SPLIT64 encoding is unsupported for this logical type; the requested encoding will be ignored`
+- Therefore, not every requested FastLanes mapping is guaranteed to be applied exactly as requested.
 
 ## Interpretation Boundaries
 

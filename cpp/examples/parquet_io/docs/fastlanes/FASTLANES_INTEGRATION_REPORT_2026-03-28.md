@@ -107,7 +107,7 @@ File:
 - cpp/include/cudf/fastlanes/common.cuh
 
 Update:
-- is_valid_for_physical(...): allow and validate NATIVE64 for INT64 physical pages.
+- is_valid_for_external_mode(...): allow and validate NATIVE64 for INT64 physical pages.
 - expected_body_size_bytes(): add NATIVE64 body-size computation.
 
 ### 6.2 Encoder dispatch

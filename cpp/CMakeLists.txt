@@ -414,8 +414,13 @@ endif()
 add_library(
   cudf
   src/fastlanes/fastlanes.cu
+  src/fastlanes/ffor.cpp
+  src/fastlanes/ffor_wrappers.cpp
   src/fastlanes/pack.cpp
   src/fastlanes/transpose.cpp
+  src/fastlanes/unffor.cpp
+  src/fastlanes/unffor_wrappers.cpp
+  src/fastlanes/unpack.cpp
   src/fastlanes/unrsum.cpp
   src/aggregation/aggregation.cpp
   src/aggregation/aggregation.cu

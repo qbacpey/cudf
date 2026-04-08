@@ -2,7 +2,7 @@
 
 ## Objective
 
-Measure the effect of switching INT64 columns from `DELTA_BINARY_PACKED` to `FASTLANES_BITPACK` under a single compression codec (`SNAPPY`) on a cuDF-produced parquet source.
+Measure the effect of switching INT64 columns from `DELTA_BINARY_PACKED` to `FASTLANE_BITPACK_SPLIT64` under a single compression codec (`SNAPPY`) on a cuDF-produced parquet source.
 
 ## Input and Constraints
 
@@ -30,12 +30,12 @@ Baseline run:
 - All 4 INT64 columns use `DELTA_BINARY_PACKED`.
 
 Second-pass sensitivity runs:
-- Toggle one INT64 column at a time to `FASTLANES_BITPACK`.
+- Toggle one INT64 column at a time to `FASTLANE_BITPACK_SPLIT64`.
 - Keep the other 3 INT64 columns as `DELTA_BINARY_PACKED`.
 - Keep all non-INT64 columns fixed.
 
 Additional aggregate control:
-- Toggle all 4 INT64 columns to `FASTLANES_BITPACK`.
+- Toggle all 4 INT64 columns to `FASTLANE_BITPACK_SPLIT64`.
 
 ## Results
 
@@ -64,19 +64,19 @@ Human-readable size deltas vs baseline:
 ## Interpretation
 
 Observed behavior is mixed by column:
-- `l_partkey` and `l_suppkey` improved with FASTLANES under SNAPPY.
-- `l_orderkey` and `l_linenumber` regressed with FASTLANES under SNAPPY.
-- Enabling FASTLANES for all four INT64 columns together is worse than all-DELTA baseline for both size and runtime.
+- `l_partkey` and `l_suppkey` improved with split64 FastLanes under SNAPPY.
+- `l_orderkey` and `l_linenumber` regressed with split64 FastLanes under SNAPPY.
+- Enabling split64 FastLanes for all four INT64 columns together is worse than all-DELTA baseline for both size and runtime.
 
 Likely reason:
 - Column value distributions differ. Some columns benefit from split32 bitpacking + SNAPPY interaction, while others are better handled by DELTA patterns.
-- FASTLANES also increased conversion time in every tested case, often substantially.
+- split64 FastLanes also increased conversion time in every tested case, often substantially.
 
 ## Practical Recommendation (SNAPPY-only)
 
 For this dataset and fixed encoding map:
 - Keep `l_orderkey` and `l_linenumber` on `DELTA_BINARY_PACKED`.
-- Consider `FASTLANES_BITPACK` for `l_partkey` and `l_suppkey` if the small size win is worth the extra conversion time.
+- Consider `FASTLANE_BITPACK_SPLIT64` for `l_partkey` and `l_suppkey` if the small size win is worth the extra conversion time.
 - Avoid all-INT64 FASTLANES in this SNAPPY setup.
 
 ## Repro Notes

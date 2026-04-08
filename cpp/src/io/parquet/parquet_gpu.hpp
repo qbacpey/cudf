@@ -80,7 +80,8 @@ CUDF_HOST_DEVICE constexpr bool is_supported_encoding(Encoding enc)
     case Encoding::DELTA_LENGTH_BYTE_ARRAY:
     case Encoding::DELTA_BYTE_ARRAY:
     case Encoding::BYTE_STREAM_SPLIT: 
-    case Encoding::FASTLANES_BITPACK: return true;
+    case Encoding::FASTLANE_BITPACK_RAW:
+    case Encoding::FASTLANE_BITPACK_SPLIT64: return true;
     default: return false;
   }
 }
@@ -224,7 +225,7 @@ enum class decode_kernel_mask {
   STRING_STREAM_SPLIT_NESTED =
     (1 << 24),  // Run decode kernel for nested BYTE_STREAM_SPLIT string data
   STRING_STREAM_SPLIT_LIST = (1 << 25),  // Run decode kernel for list BYTE_STREAM_SPLIT string data
-  FASTLANES_BINARY = (1 << 26)  // Run decode kernel for FASTLANES_BITPACK encoded data
+  FASTLANES_BINARY = (1 << 26)  // Run decode kernel for FASTLANE_BITPACK_RAW encoded data
 };
 
 constexpr uint32_t STRINGS_MASK_NON_DELTA = BitOr(decode_kernel_mask::STRING,
@@ -561,8 +562,9 @@ enum class encode_kernel_mask {
   DELTA_LENGTH_BA   = (1 << 3),  // Run DELTA_LENGTH_BYTE_ARRAY encoding kernel
   DELTA_BYTE_ARRAY  = (1 << 4),  // Run DELTA_BYtE_ARRAY encoding kernel
   BYTE_STREAM_SPLIT = (1 << 5),   // Run plain encoding kernel, but split streams
-  FASTLANES_BITPACK = (1 << 6), // Use fastlanes for bitpacking levels
-  FASTLANES_DELTA_BINARY = (1 << 7)  // Use fastlanes for DELTA_BINARY_PACKED encoding kernel
+  FASTLANE_BITPACK_RAW = (1 << 6), // Use fastlanes raw mode bitpacking
+  FASTLANES_DELTA_BINARY = (1 << 7),  // Use fastlanes for DELTA_BINARY_PACKED encoding kernel
+  FASTLANE_BITPACK_SPLIT64 = (1 << 8)  // Use fastlanes split64 bitpacking levels
 };
 
 /**
@@ -926,7 +928,7 @@ void decode_delta_binary(cudf::detail::hostdevice_span<PageInfo> pages,
                          rmm::cuda_stream_view stream);
 
 /**
- * @brief Launches kernel for reading FASTLANES_BITPACK encoded column data stored in the pages
+ * @brief Launches kernel for reading FASTLANE_BITPACK_RAW encoded column data stored in the pages
  *
  * This is a debug kernel that reads and pretty-prints the FastLanes page header
  * and encoded payload for round-trip verification.
@@ -950,7 +952,7 @@ void decode_fastlanes_binary(cudf::detail::hostdevice_span<PageInfo> pages,
                              rmm::cuda_stream_view stream);
 
 /**
- * @brief Launches dedicated debug kernel for FASTLANES_BITPACK pages.
+ * @brief Launches dedicated debug kernel for FASTLANE_BITPACK_RAW pages.
  *
  * This path is intentionally separate from decode_fastlanes_binary so debug
  * dumping cannot change decode behavior. Runtime control is via

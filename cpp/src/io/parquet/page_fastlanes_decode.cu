@@ -123,8 +123,20 @@ __device__ inline bool setup_and_validate_fastlanes_page(
     return fastlanes_set_decode_error(lane, error_code, decode_error::INVALID_DATA_TYPE);
   }
 
+  auto const is_split64_page_encoding = s->page.encoding == Encoding::FASTLANE_BITPACK_SPLIT64;
+  auto const is_raw_page_encoding     = s->page.encoding == Encoding::FASTLANE_BITPACK_RAW;
   auto const header = fastlanes::PageHeader::deserialize(s->data_start);
-  if (!fastlanes::is_valid_for_physical(header, expected_physical_type == Type::INT64)) {
+
+  if (!is_split64_page_encoding && !is_raw_page_encoding) {
+    return fastlanes_set_decode_error(lane, error_code, decode_error::UNSUPPORTED_ENCODING);
+  }
+
+  if (is_split64_page_encoding != (expected_physical_type == Type::INT64)) {
+    return fastlanes_set_decode_error(lane, error_code, decode_error::INVALID_DATA_TYPE);
+  }
+
+  auto const split64_mode = is_split64_page_encoding;
+  if (!fastlanes::is_valid_for_external_mode(header, split64_mode)) {
     return fastlanes_set_decode_error(lane, error_code, decode_error::INVALID_DATA_TYPE);
   }
 
@@ -190,11 +202,13 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_debug_block_size)
     info->max_nesting_depth   = s->col.max_nesting_depth;
     info->skipped_leaf_values = s->page.skipped_leaf_values;
 
-    auto const fl_hdr   = fastlanes::PageHeader::deserialize(s->data_start);
-    info->bitwidth       = fl_hdr.bitwidth;
-    info->cast_mode      = static_cast<uint8_t>(fl_hdr.layout_mode);
-    info->layout_mode    = static_cast<uint8_t>(fl_hdr.layout_mode);
-    info->bitwidth_mode  = static_cast<uint8_t>(fl_hdr.bitwidth_mode);
+    auto const fl_hdr               = fastlanes::PageHeader::deserialize(s->data_start);
+    auto const is_split64_page_mode = s->page.encoding == Encoding::FASTLANE_BITPACK_SPLIT64;
+    info->bitwidth       = fl_hdr.component_bitwidth_low;
+    info->cast_mode      = 0;
+    info->layout_mode    = static_cast<uint8_t>(is_split64_page_mode ? 2 : 1);
+    info->bitwidth_mode  = static_cast<uint8_t>(is_split64_page_mode ? 2 : 1);
+    info->pre_delta      = fl_hdr.pre_delta;
     info->component_bitwidth_low  = fl_hdr.component_bitwidth_low;
     info->component_bitwidth_high = fl_hdr.component_bitwidth_high;
     info->original_count = fl_hdr.original_count;
@@ -259,7 +273,8 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
   }
 
   auto const* payload_bytes = fastlanes::PageHeader::payload_ptr(s->data_start);
-  auto const packed_words_per_vector = static_cast<uint32_t>(fastlanes_header.bitwidth) * 32;
+  auto const packed_words_per_vector =
+    static_cast<uint32_t>(fastlanes_header.component_bitwidth_low) * 32;
   auto const min_value_bits          = fastlanes_header.min_value_low_bits;
 
   auto const leaf_level_idx = s->col.max_nesting_depth - 1;
@@ -290,7 +305,7 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
     }
     block.sync();
 
-    unpack_device(packed_vec_aligned, decoded_vec, fastlanes_header.bitwidth);
+    unpack_device(packed_vec_aligned, decoded_vec, fastlanes_header.component_bitwidth_low);
     block.sync();
 
     for (uint32_t i = lane; i < values_in_vector; i += decode_fastlanes_block_size) {

@@ -1,6 +1,6 @@
 # INT64 FastLanes Page-Stats Workflow (SNAPPY)
 
-This workflow captures page-level FastLanes SPLIT32 metadata for INT64 sensitivity runs,
+This workflow captures page-level FastLanes SPLIT64 metadata for INT64 sensitivity runs,
 then exports a canonical CSV and plot report.
 
 ## Scope
@@ -8,8 +8,8 @@ then exports a canonical CSV and plot report.
 - Compression codec: `SNAPPY` only
 - Cases:
   - baseline: all INT64 columns set to `DELTA_BINARY_PACKED`
-  - one-by-one: each INT64 column toggled to `FASTLANES_BITPACK`
-  - aggregate control: all INT64 columns toggled to `FASTLANES_BITPACK`
+  - one-by-one: each INT64 column toggled to `FASTLANE_BITPACK_SPLIT64`
+  - aggregate control: all INT64 columns toggled to `FASTLANE_BITPACK_SPLIT64`
 - Validation: C++ row-group validation in `parquet_io_chunk` remains enabled
 
 ## Preconditions

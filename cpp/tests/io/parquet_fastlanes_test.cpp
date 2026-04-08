@@ -39,6 +39,17 @@ class ParquetCpuEncoderTest : public cudf::test::BaseFixture {
 
 namespace {
 
+cudf::io::column_encoding requested_column_encoding_for_expected(
+  cudf::io::parquet::Encoding expected_encoding)
+{
+  switch (expected_encoding) {
+    case cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64:
+      return cudf::io::column_encoding::FASTLANE_BITPACK_SPLIT64;
+    case cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW:
+    default: return cudf::io::column_encoding::FASTLANE_BITPACK_RAW;
+  }
+}
+
 template <typename T>
 void write_single_column(std::vector<T> const& values,
                          std::string const& file_name,
@@ -54,7 +65,7 @@ void write_single_column(std::vector<T> const& values,
 
   cudf::io::table_input_metadata metadata(input);
   metadata.column_metadata[0].set_name("col0");
-  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
 
   auto cleanup = [&]() { std::remove(filepath.c_str()); };
 
@@ -204,7 +215,8 @@ void write_single_column_typed_expect_physical_and_encoding(
 
   cudf::io::table_input_metadata metadata(input);
   metadata.column_metadata[0].set_name("col0");
-  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[0].set_encoding(
+    requested_column_encoding_for_expected(encoding_to_check));
   if (set_decimal_precision) {
     metadata.column_metadata[0].set_decimal_precision(decimal_precision);
   }
@@ -276,7 +288,8 @@ void roundtrip_single_column_typed_expect_encoding(std::vector<SourceT> const& v
 
   cudf::io::table_input_metadata metadata(input);
   metadata.column_metadata[0].set_name("col0");
-  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[0].set_encoding(
+    requested_column_encoding_for_expected(expected_encoding));
 
   try {
     auto builder =
@@ -317,7 +330,7 @@ void roundtrip_single_column_typed_expect_not_encoding(
 
   cudf::io::table_input_metadata metadata(input);
   metadata.column_metadata[0].set_name("col0");
-  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
 
   try {
     auto builder =
@@ -359,8 +372,8 @@ void roundtrip_single_column_typed_expect_not_encoding(
 //   cudf::io::table_input_metadata metadata(input);
 //   metadata.column_metadata[0].set_name("i32_col");
 //   metadata.column_metadata[1].set_name("u32_col");
-//   metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
-//   metadata.column_metadata[1].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+//   metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
+//   metadata.column_metadata[1].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
 
 //   auto cleanup = [&]() { std::remove(filepath.c_str()); };
 
@@ -395,7 +408,7 @@ void roundtrip_single_column_typed_expect_not_encoding(
 // 1) INT32 baseline and edge-path roundtrip
 // 2) Header metadata validity
 // 3) INT32 logical-type eligibility matrix
-// 4) INT64/UINT64 split32 data-path coverage
+// 4) INT64/UINT64 split64 data-path coverage
 // 5) Unsupported logical fallback behavior
 // 6) Mixed-encoding workload-like scenarios
 //
@@ -505,7 +518,7 @@ TEST_F(ParquetCpuEncoderTest, FallbackForUnsupportedType)
 
     cudf::io::table_input_metadata metadata(input);
     metadata.column_metadata[0].set_name("col0");
-    metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+    metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
 
     auto builder =
       cudf::io::parquet_writer_options::builder(cudf::io::sink_info{filepath}, input)
@@ -561,7 +574,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesUInt32LogicalTypeForcedBitpack)
   roundtrip_single_column_typed_expect_encoding<uint32_t, uint32_t>(
     values,
     "test_fastlanes_u32_logical_type.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW,
     1024,
     4096);
 }
@@ -588,7 +601,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesUInt32BoundaryAcrossSignedSplitForcedBitp
   roundtrip_single_column_typed_expect_encoding<uint32_t, uint32_t>(
     values,
     "test_fastlanes_u32_signed_split_boundary.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW,
     1024,
     4096);
 }
@@ -666,20 +679,23 @@ TEST_F(ParquetCpuEncoderTest, FastLanesHeaderScalar32MetadataRoundTrip)
 
   auto const header = fastlanes::PageHeader::deserialize(blob.data());
 
-  EXPECT_EQ(header.bitwidth, 17);
-  EXPECT_EQ(header.layout_mode, fastlanes::PageLayoutMode::SCALAR32);
-  EXPECT_EQ(header.bitwidth_mode, fastlanes::BitwidthMode::SINGLE);
   EXPECT_EQ(header.component_bitwidth_low, 17);
   EXPECT_EQ(header.component_bitwidth_high, 0);
+  EXPECT_TRUE(header.pre_delta);
   EXPECT_EQ(header.original_count, 100);
   EXPECT_EQ(header.padded_count, 1024);
   EXPECT_EQ(header.body_size, body.size());
   EXPECT_EQ(header.min_value_low_bits, min_value_low);
   EXPECT_EQ(header.min_value_high_bits, 0);
-  EXPECT_TRUE(header.is_scalar32_layout());
-  EXPECT_FALSE(header.is_split32_layout());
-  EXPECT_TRUE(fastlanes::is_valid_for_physical(header, false));
+  EXPECT_TRUE(fastlanes::is_valid_for_external_mode(header, false));
+  EXPECT_FALSE(fastlanes::is_valid_for_external_mode(header, true));
   EXPECT_EQ(fastlanes::u32_bits_to_int32(header.min_value_low_bits), -1234567);
+
+  // Reserved flags are ignored for mode identity.
+  blob[fastlanes::PageHeader::OFFSET_RESERVED_FLAGS] = 0xff;
+  auto const header_with_reserved_flags = fastlanes::PageHeader::deserialize(blob.data());
+  EXPECT_TRUE(fastlanes::is_valid_for_external_mode(header_with_reserved_flags, false));
+  EXPECT_TRUE(header_with_reserved_flags.pre_delta);
 }
 
 // -----------------------------------------------------------------------------
@@ -696,16 +712,13 @@ TEST_F(ParquetCpuEncoderTest, FastLanesHeaderSplit32MetadataRoundTrip)
 
   auto const header = fastlanes::PageHeader::deserialize(blob.data());
 
-  EXPECT_EQ(header.layout_mode, fastlanes::PageLayoutMode::SPLIT32);
-  EXPECT_EQ(header.bitwidth_mode, fastlanes::BitwidthMode::SPLIT_COMPONENTS);
   EXPECT_EQ(header.component_bitwidth_low, 13);
   EXPECT_EQ(header.component_bitwidth_high, 27);
+  EXPECT_TRUE(header.pre_delta);
   EXPECT_EQ(header.min_value_low_bits, 0x89abcdefu);
   EXPECT_EQ(header.min_value_high_bits, 0x10203040u);
-  EXPECT_TRUE(header.is_split32_layout());
-  EXPECT_FALSE(header.is_scalar32_layout());
-  EXPECT_TRUE(fastlanes::is_valid_for_physical(header, true));
-  EXPECT_FALSE(fastlanes::is_valid_for_physical(header, false));
+  EXPECT_TRUE(fastlanes::is_valid_for_external_mode(header, true));
+  EXPECT_FALSE(fastlanes::is_valid_for_external_mode(header, false));
 }
 
 TEST_F(ParquetCpuEncoderTest, FastLanesHeaderRejectsMalformedSplit32Metadata)
@@ -713,18 +726,99 @@ TEST_F(ParquetCpuEncoderTest, FastLanesHeaderRejectsMalformedSplit32Metadata)
   auto malformed = fastlanes::PageHeader::serialize_split32(7, 7, 64, 1024, 0u, 0u, nullptr, 0);
 
   auto header = fastlanes::PageHeader::deserialize(malformed.data());
-  EXPECT_FALSE(fastlanes::is_valid_for_physical(header, true));
+  EXPECT_FALSE(fastlanes::is_valid_for_external_mode(header, true));
 
-  malformed[fastlanes::PageHeader::OFFSET_BITWIDTH_MODE] =
-    static_cast<uint8_t>(fastlanes::BitwidthMode::SINGLE);
+  // Reserved flags do not define mode identity.
+  malformed[fastlanes::PageHeader::OFFSET_RESERVED_FLAGS] = 0x7f;
   header = fastlanes::PageHeader::deserialize(malformed.data());
-  EXPECT_FALSE(fastlanes::is_valid_for_physical(header, true));
+  EXPECT_FALSE(fastlanes::is_valid_for_external_mode(header, true));
 
-  malformed[fastlanes::PageHeader::OFFSET_BITWIDTH_MODE] =
-    static_cast<uint8_t>(fastlanes::BitwidthMode::SPLIT_COMPONENTS);
+  std::vector<uint8_t> body(fastlanes::encoded_size_bytes(1024, 7) +
+                            fastlanes::encoded_size_bytes(1024, 7),
+                            uint8_t{0});
+  auto valid = fastlanes::PageHeader::serialize_split32(
+    7, 7, 64, 1024, 0u, 0u, body.data(), body.size());
+  header = fastlanes::PageHeader::deserialize(valid.data());
+  EXPECT_TRUE(fastlanes::is_valid_for_external_mode(header, true));
+
+  valid[fastlanes::PageHeader::OFFSET_RESERVED_FLAGS] = 0x2a;
+  header = fastlanes::PageHeader::deserialize(valid.data());
+  EXPECT_TRUE(fastlanes::is_valid_for_external_mode(header, true));
+
+  // Split64 metadata still rejects malformed component widths.
   malformed[fastlanes::PageHeader::OFFSET_COMPONENT_BW_LOW] = 0;
   header = fastlanes::PageHeader::deserialize(malformed.data());
-  EXPECT_FALSE(fastlanes::is_valid_for_physical(header, true));
+  EXPECT_FALSE(fastlanes::is_valid_for_external_mode(header, true));
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesRawSplit64DefaultPreDelta)
+{
+  EXPECT_TRUE(fastlanes::default_pre_delta_for_mode(false));
+  EXPECT_TRUE(fastlanes::default_pre_delta_for_mode(true));
+
+  std::vector<uint8_t> scalar_body(fastlanes::encoded_size_bytes(1024, 9), uint8_t{0});
+  auto scalar_blob = fastlanes::PageHeader::serialize_scalar32(
+    9, 128, 1024, 0x1234u, scalar_body.data(), scalar_body.size());
+  auto const scalar_header = fastlanes::PageHeader::deserialize(scalar_blob.data());
+  EXPECT_TRUE(scalar_header.pre_delta);
+  EXPECT_TRUE(fastlanes::is_valid_for_external_mode(scalar_header, false));
+
+  std::vector<uint8_t> split_body(fastlanes::encoded_size_bytes(1024, 7) +
+                                    fastlanes::encoded_size_bytes(1024, 11),
+                                  uint8_t{0});
+  auto split_blob = fastlanes::PageHeader::serialize_split32(
+    7, 11, 128, 1024, 0x11111111u, 0x22222222u, split_body.data(), split_body.size());
+  auto const split_header = fastlanes::PageHeader::deserialize(split_blob.data());
+  EXPECT_TRUE(split_header.pre_delta);
+  EXPECT_TRUE(fastlanes::is_valid_for_external_mode(split_header, true));
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesRawRejectsPreDeltaFalse)
+{
+  EXPECT_TRUE(fastlanes::default_pre_delta_for_mode(false));
+
+  std::vector<uint8_t> body(fastlanes::encoded_size_bytes(1024, 10), uint8_t{0});
+  auto blob = fastlanes::PageHeader::serialize_scalar32(
+    10, 128, 1024, 0xdeadbeefu, body.data(), body.size());
+
+  auto header = fastlanes::PageHeader::deserialize(blob.data());
+  EXPECT_TRUE(header.pre_delta);
+  EXPECT_TRUE(fastlanes::is_valid_for_external_mode(header, false));
+
+  blob[fastlanes::PageHeader::OFFSET_PRE_DELTA] = 0;
+  header                                         = fastlanes::PageHeader::deserialize(blob.data());
+  EXPECT_FALSE(header.pre_delta);
+  EXPECT_FALSE(fastlanes::is_valid_for_external_mode(header, false));
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesDecodeRejectsRawPreDeltaDisabled)
+{
+  std::vector<uint8_t> body(fastlanes::encoded_size_bytes(1024, 12), uint8_t{0});
+  auto blob = fastlanes::PageHeader::serialize_scalar32(
+    12, 64, 1024, 0x55u, body.data(), body.size());
+
+  blob[fastlanes::PageHeader::OFFSET_PRE_DELTA] = 0;
+  auto header = fastlanes::PageHeader::deserialize(blob.data());
+  EXPECT_FALSE(header.pre_delta);
+  EXPECT_FALSE(fastlanes::is_valid_for_external_mode(header, false));
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesSplit64DecodeHonorsPreDelta)
+{
+  std::vector<uint8_t> split_body(fastlanes::encoded_size_bytes(1024, 9) +
+                                    fastlanes::encoded_size_bytes(1024, 10),
+                                  uint8_t{0});
+  auto split_blob = fastlanes::PageHeader::serialize_split32(
+    9, 10, 64, 1024, 0x100u, 0x200u, split_body.data(), split_body.size());
+
+  auto split_header = fastlanes::PageHeader::deserialize(split_blob.data());
+  EXPECT_TRUE(split_header.pre_delta);
+  EXPECT_TRUE(fastlanes::is_valid_for_external_mode(split_header, true));
+
+  split_blob[fastlanes::PageHeader::OFFSET_PRE_DELTA] = 0;
+  split_header                                         = fastlanes::PageHeader::deserialize(split_blob.data());
+  EXPECT_FALSE(split_header.pre_delta);
+  EXPECT_FALSE(fastlanes::is_valid_for_external_mode(split_header, true));
 }
 
 TEST_F(ParquetCpuEncoderTest, FastLanesMixedEncodingsWithDate32LogicalType)
@@ -785,15 +879,15 @@ TEST_F(ParquetCpuEncoderTest, FastLanesMixedEncodingsWithDate32LogicalType)
   metadata.column_metadata[2].set_name("l_linenumber");
   metadata.column_metadata[2].set_encoding(cudf::io::column_encoding::DICTIONARY);
   metadata.column_metadata[3].set_name("l_returnflag");
-  metadata.column_metadata[3].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[3].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
   metadata.column_metadata[4].set_name("l_linestatus");
-  metadata.column_metadata[4].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[4].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
   metadata.column_metadata[5].set_name("l_shipdate");
   metadata.column_metadata[5].set_encoding(cudf::io::column_encoding::DICTIONARY);
   metadata.column_metadata[6].set_name("l_receiptdate");
   metadata.column_metadata[6].set_encoding(cudf::io::column_encoding::DELTA_BINARY_PACKED);
   metadata.column_metadata[7].set_name("l_shipmode");
-  metadata.column_metadata[7].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[7].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
 
   roundtrip_with_metadata(
     input, metadata, "test_fastlanes_mixed_with_date32_logical.parquet", 1024, 4096);
@@ -815,7 +909,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesDate32LogicalTypeForcedBitpack)
 
   cudf::io::table_input_metadata metadata(input);
   metadata.column_metadata[0].set_name("date32_col");
-  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
 
   roundtrip_with_metadata(input, metadata, "test_fastlanes_date32_forced_bitpack.parquet", 1024, 4096);
 }
@@ -835,7 +929,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesDate32LogicalTypeForcedBitpackNegativePre
   roundtrip_single_column_typed_expect_encoding<cudf::timestamp_D>(
     values,
     "test_fastlanes_date32_negative_forced_bitpack.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW,
     1024,
     4096);
 }
@@ -857,7 +951,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesDecimal32LogicalTypeForcedBitpack)
 
   cudf::io::table_input_metadata metadata(input);
   metadata.column_metadata[0].set_name("decimal32_col").set_decimal_precision(9);
-  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
 
   roundtrip_with_metadata(
     input, metadata, "test_fastlanes_decimal32_forced_bitpack.parquet", 1024, 4096);
@@ -872,7 +966,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesDurationMillisLogicalTypeForcedBitpack)
   roundtrip_single_column_typed_expect_encoding<cudf::duration_ms>(
     values,
     "test_fastlanes_duration_ms_forced_bitpack.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW,
     1024,
     4096);
 }
@@ -893,7 +987,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesDurationMillisLogicalTypeForcedBitpackNeg
   roundtrip_single_column_typed_expect_encoding<cudf::duration_ms>(
     values,
     "test_fastlanes_duration_ms_negative_forced_bitpack.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW,
     1024,
     4096);
 }
@@ -915,7 +1009,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesDurationSecondsLogicalTypeForcedBitpackNo
 
   cudf::io::table_input_metadata metadata(input);
   metadata.column_metadata[0].set_name("time_millis_seconds_col");
-  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
 
   auto const filepath = "test_fastlanes_duration_s_forced_bitpack_roundtrip.parquet";
   auto cleanup        = [&]() { std::remove(filepath); };
@@ -927,7 +1021,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesDurationSecondsLogicalTypeForcedBitpackNo
                    .max_page_size_bytes(4096);
   cudf::io::write_parquet(builder);
 
-  expect_first_data_page_encoding(filepath, cudf::io::parquet::Encoding::FASTLANES_BITPACK);
+  expect_first_data_page_encoding(filepath, cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW);
 
   auto in_opts = cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath});
   auto result  = cudf::io::read_parquet(in_opts);
@@ -965,7 +1059,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesDurationSecondsLogicalTypeForcedBitpackNe
 
   cudf::io::table_input_metadata metadata(input);
   metadata.column_metadata[0].set_name("time_millis_seconds_col_negative");
-  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
 
   auto const filepath = "test_fastlanes_duration_s_negative_forced_bitpack_roundtrip.parquet";
   auto cleanup        = [&]() { std::remove(filepath); };
@@ -977,7 +1071,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesDurationSecondsLogicalTypeForcedBitpackNe
                    .max_page_size_bytes(4096);
   cudf::io::write_parquet(builder);
 
-  expect_first_data_page_encoding(filepath, cudf::io::parquet::Encoding::FASTLANES_BITPACK);
+  expect_first_data_page_encoding(filepath, cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW);
 
   auto in_opts = cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath});
   auto result  = cudf::io::read_parquet(in_opts);
@@ -997,7 +1091,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesInt8LogicalTypeForcedBitpack)
   }
   roundtrip_single_column_expect_encoding(values,
                                           "test_fastlanes_i8_forced_bitpack_roundtrip.parquet",
-                                          cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+                                          cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW,
                                           1024,
                                           4096);
 }
@@ -1010,7 +1104,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesInt16LogicalTypeForcedBitpack)
   }
   roundtrip_single_column_expect_encoding(values,
                                           "test_fastlanes_i16_forced_bitpack_roundtrip.parquet",
-                                          cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+                                          cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW,
                                           1024,
                                           4096);
 }
@@ -1024,7 +1118,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesUInt8LogicalTypeForcedBitpack)
   roundtrip_single_column_expect_encoding(
     values,
     "test_fastlanes_u8_forced_bitpack_roundtrip.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW,
     1024,
     4096);
 }
@@ -1038,13 +1132,13 @@ TEST_F(ParquetCpuEncoderTest, FastLanesUInt16LogicalTypeForcedBitpack)
   roundtrip_single_column_expect_encoding(
     values,
     "test_fastlanes_u16_forced_bitpack_roundtrip.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW,
     1024,
     4096);
 }
 
 // -----------------------------------------------------------------------------
-// Group 5: INT64/UINT64 split32 data-path coverage
+// Group 5: INT64/UINT64 split64 data-path coverage
 // -----------------------------------------------------------------------------
 
 TEST_F(ParquetCpuEncoderTest, FastLanesInt64SinglePageForcedBitpack)
@@ -1055,7 +1149,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesInt64SinglePageForcedBitpack)
   roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
     values,
     "test_fastlanes_i64_single_page_forced_bitpack.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64,
     1024,
     4096);
 }
@@ -1068,7 +1162,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesInt64MultiplePagesForcedBitpack)
   roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
     values,
     "test_fastlanes_i64_multi_page_forced_bitpack.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64,
     1024,
     4096);
 }
@@ -1083,7 +1177,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesInt64SinglePageNegativeForcedBitpack)
   roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
     values,
     "test_fastlanes_i64_single_page_negative_forced_bitpack.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64,
     1024,
     4096);
 }
@@ -1103,7 +1197,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesInt64TinySizesAndPaddingBoundariesForcedB
     std::string const file_name = "test_fastlanes_i64_tiny_size_" + std::to_string(n) +
                                   "_forced_bitpack.parquet";
     roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
-      values, file_name, cudf::io::parquet::Encoding::FASTLANES_BITPACK, 1024, 4096);
+      values, file_name, cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64, 1024, 4096);
   }
 }
 
@@ -1118,7 +1212,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesInt64MultiPageDifferentBitwidthsForcedBit
   roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
     values,
     "test_fastlanes_i64_multi_page_bw_forced_bitpack.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64,
     1024,
     4096);
 }
@@ -1140,7 +1234,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesInt64HighBitwidthFullPagesForcedBitpack)
   roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
     values,
     "test_fastlanes_i64_high_bw_full_pages_forced_bitpack.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64,
     1024,
     4096);
 }
@@ -1162,14 +1256,14 @@ TEST_F(ParquetCpuEncoderTest, FastLanesInt64HighBitwidthTinyTailPageForcedBitpac
   roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
     values,
     "test_fastlanes_i64_high_bw_tiny_tail_forced_bitpack.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64,
     1024,
     4096);
 }
 
 TEST_F(ParquetCpuEncoderTest, FastLanesInt64DataRoundtripCoverage)
 {
-  auto const expected_encoding = cudf::io::parquet::Encoding::FASTLANES_BITPACK;
+  auto const expected_encoding = cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64;
 
   std::vector<int64_t> values(2050);
   for (size_t i = 0; i < values.size(); ++i) {
@@ -1186,7 +1280,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesInt64DataRoundtripCoverage)
   values[1024]              = std::numeric_limits<int64_t>::min() / 2;
   values[values.size() - 1] = std::numeric_limits<int64_t>::max();
 
-  // Data-path roundtrip coverage for split32 INT64 FastLanes.
+  // Data-path roundtrip coverage for split64 INT64 FastLanes.
   roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
     values,
     "test_fastlanes_i64_physical_logical_roundtrip.parquet",
@@ -1214,14 +1308,14 @@ TEST_F(ParquetCpuEncoderTest, FastLanesInt64NegativeCastingAndExtremes)
   roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
     values,
     "test_fastlanes_i64_negative_extremes_roundtrip.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64,
     1024,
     4096);
 }
 
 TEST_F(ParquetCpuEncoderTest, FastLanesInt64BoundarySizesForcedBitpack)
 {
-  // Boundary-size data-path coverage for split32 INT64 FastLanes.
+  // Boundary-size data-path coverage for split64 INT64 FastLanes.
   std::vector<int32_t> const test_sizes = {
     1, 2, 3, 31, 32, 33, 63, 64, 65, 127, 128, 129, 511, 512, 513, 1023, 1024, 1025, 2047, 2048,
     2049};
@@ -1242,7 +1336,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesInt64BoundarySizesForcedBitpack)
     std::string const file_name = "test_fastlanes_i64_boundary_size_" + std::to_string(n) +
                                   "_forced_bitpack.parquet";
     roundtrip_single_column_typed_expect_encoding<int64_t, int64_t>(
-      values, file_name, cudf::io::parquet::Encoding::FASTLANES_BITPACK, 1024, 4096);
+      values, file_name, cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64, 1024, 4096);
   }
 }
 
@@ -1254,7 +1348,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesUInt64SinglePageForcedBitpack)
   roundtrip_single_column_typed_expect_encoding<uint64_t, uint64_t>(
     values,
     "test_fastlanes_u64_single_page_forced_bitpack.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64,
     1024,
     4096);
 }
@@ -1267,7 +1361,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesUInt64MultiplePagesForcedBitpack)
   roundtrip_single_column_typed_expect_encoding<uint64_t, uint64_t>(
     values,
     "test_fastlanes_u64_multi_page_forced_bitpack.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64,
     1024,
     4096);
 }
@@ -1287,7 +1381,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesUInt64TinySizesAndPaddingBoundariesForced
     std::string const file_name = "test_fastlanes_u64_tiny_size_" + std::to_string(n) +
                                   "_forced_bitpack.parquet";
     roundtrip_single_column_typed_expect_encoding<uint64_t, uint64_t>(
-      values, file_name, cudf::io::parquet::Encoding::FASTLANES_BITPACK, 1024, 4096);
+      values, file_name, cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64, 1024, 4096);
   }
 }
 
@@ -1306,7 +1400,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesUInt64MultiPageDifferentBitwidthsForcedBi
   roundtrip_single_column_typed_expect_encoding<uint64_t, uint64_t>(
     values,
     "test_fastlanes_u64_multi_page_bw_forced_bitpack.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64,
     1024,
     4096);
 }
@@ -1328,7 +1422,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesUInt64HighBitwidthFullPagesForcedBitpack)
   roundtrip_single_column_typed_expect_encoding<uint64_t, uint64_t>(
     values,
     "test_fastlanes_u64_high_bw_full_pages_forced_bitpack.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64,
     1024,
     4096);
 }
@@ -1350,7 +1444,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesUInt64HighBitwidthTinyTailPageForcedBitpa
   roundtrip_single_column_typed_expect_encoding<uint64_t, uint64_t>(
     values,
     "test_fastlanes_u64_high_bw_tiny_tail_forced_bitpack.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64,
     1024,
     4096);
 }
@@ -1376,14 +1470,14 @@ TEST_F(ParquetCpuEncoderTest, FastLanesUInt64BoundaryAcrossSignedSplitForcedBitp
   roundtrip_single_column_typed_expect_encoding<uint64_t, uint64_t>(
     values,
     "test_fastlanes_u64_signed_split_boundary_forced_bitpack.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64,
     1024,
     4096);
 }
 
 TEST_F(ParquetCpuEncoderTest, FastLanesUInt64FullRangeForcedBitpack)
 {
-  // Full-range UINT64 data-path coverage for split32 FastLanes.
+  // Full-range UINT64 data-path coverage for split64 FastLanes.
   std::vector<uint64_t> values(3075);
   for (size_t i = 0; i < values.size(); ++i) {
     auto const ii = static_cast<uint64_t>(i + 1);
@@ -1405,14 +1499,14 @@ TEST_F(ParquetCpuEncoderTest, FastLanesUInt64FullRangeForcedBitpack)
   roundtrip_single_column_typed_expect_encoding<uint64_t, uint64_t>(
     values,
     "test_fastlanes_u64_full_range_forced_bitpack_roundtrip.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64,
     1024,
     4096);
 }
 
 TEST_F(ParquetCpuEncoderTest, FastLanesUInt64BoundarySizesForcedBitpack)
 {
-  // Boundary-size data-path coverage for split32 UINT64 FastLanes.
+  // Boundary-size data-path coverage for split64 UINT64 FastLanes.
   std::vector<int32_t> const test_sizes = {
     1, 2, 3, 31, 32, 33, 63, 64, 65, 127, 128, 129, 511, 512, 513, 1023, 1024, 1025, 2047, 2048,
     2049};
@@ -1432,14 +1526,14 @@ TEST_F(ParquetCpuEncoderTest, FastLanesUInt64BoundarySizesForcedBitpack)
     std::string const file_name = "test_fastlanes_u64_boundary_size_" + std::to_string(n) +
                                   "_forced_bitpack.parquet";
     roundtrip_single_column_typed_expect_encoding<uint64_t, uint64_t>(
-      values, file_name, cudf::io::parquet::Encoding::FASTLANES_BITPACK, 1024, 4096);
+      values, file_name, cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64, 1024, 4096);
   }
 }
 
 TEST_F(ParquetCpuEncoderTest, FastLanesInt64PhysicalLogicalTypeSupportMatrix)
 {
   auto const expected_physical = cudf::io::parquet::Type::INT64;
-  auto const expected_encoding = cudf::io::parquet::Encoding::FASTLANES_BITPACK;
+  auto const expected_encoding = cudf::io::parquet::Encoding::FASTLANE_BITPACK_SPLIT64;
 
   std::vector<int64_t> i64_values(2050);
   std::vector<uint64_t> u64_values(2050);
@@ -1522,13 +1616,13 @@ TEST_F(ParquetCpuEncoderTest, FastLanesMixedEncodingsWithUint64FastLanesColumns)
 
   cudf::io::table_input_metadata metadata(input);
   metadata.column_metadata[0].set_name("l_orderkey");
-  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_SPLIT64);
   metadata.column_metadata[1].set_name("l_partkey");
-  metadata.column_metadata[1].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[1].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_SPLIT64);
   metadata.column_metadata[2].set_name("l_returnflag");
-  metadata.column_metadata[2].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[2].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
   metadata.column_metadata[3].set_name("l_linestatus");
-  metadata.column_metadata[3].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[3].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
   metadata.column_metadata[4].set_name("l_shipdate");
   metadata.column_metadata[4].set_encoding(cudf::io::column_encoding::DICTIONARY);
 
@@ -1575,13 +1669,13 @@ TEST_F(ParquetCpuEncoderTest, FastLanesMixedEncodingsWithInt64FastLanesColumns)
 
   cudf::io::table_input_metadata metadata(input);
   metadata.column_metadata[0].set_name("l_orderkey");
-  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_SPLIT64);
   metadata.column_metadata[1].set_name("l_partkey");
-  metadata.column_metadata[1].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[1].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_SPLIT64);
   metadata.column_metadata[2].set_name("l_returnflag");
-  metadata.column_metadata[2].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[2].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
   metadata.column_metadata[3].set_name("l_linestatus");
-  metadata.column_metadata[3].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[3].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
   metadata.column_metadata[4].set_name("l_shipdate");
   metadata.column_metadata[4].set_encoding(cudf::io::column_encoding::DICTIONARY);
 
@@ -1596,7 +1690,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesMixedEncodingsWithInt64FastLanesColumns)
 TEST_F(ParquetCpuEncoderTest, FastLanesInt32PhysicalLogicalTypeSupportMatrix)
 {
   auto const expected_physical = cudf::io::parquet::Type::INT32;
-  auto const expected_encoding = cudf::io::parquet::Encoding::FASTLANES_BITPACK;
+  auto const expected_encoding = cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW;
 
   std::vector<int8_t> i8_values(2050);
   std::vector<uint8_t> u8_values(2050);
@@ -1739,7 +1833,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesInt32PhysicalLogicalTypeSupportMatrix)
 TEST_F(ParquetCpuEncoderTest, FastLanesInt32PhysicalLogicalTypeDurationDaysSupportedMatrix)
 {
   auto const expected_physical = cudf::io::parquet::Type::INT32;
-  auto const fastlanes_encoding = cudf::io::parquet::Encoding::FASTLANES_BITPACK;
+  auto const fastlanes_encoding = cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW;
 
   std::vector<cudf::duration_D::rep> duration_day_values(2050);
   for (int i = 0; i < 2050; ++i) {
@@ -1793,7 +1887,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesDurationDaysLogicalTypeForcedBitpackNegat
 
   cudf::io::table_input_metadata metadata(input);
   metadata.column_metadata[0].set_name("time_millis_days_col_negative");
-  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
 
   auto const filepath = "test_fastlanes_duration_d_negative_forced_bitpack_roundtrip.parquet";
   auto cleanup        = [&]() { std::remove(filepath); };
@@ -1805,7 +1899,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesDurationDaysLogicalTypeForcedBitpackNegat
                    .max_page_size_bytes(4096);
   cudf::io::write_parquet(builder);
 
-  expect_first_data_page_encoding(filepath, cudf::io::parquet::Encoding::FASTLANES_BITPACK);
+  expect_first_data_page_encoding(filepath, cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW);
 
   auto in_opts = cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath});
   auto result  = cudf::io::read_parquet(in_opts);
@@ -1827,7 +1921,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesDurationMicrosecondsLogicalTypeFallsBackF
   roundtrip_single_column_typed_expect_not_encoding<cudf::duration_us>(
     values,
     "test_fastlanes_duration_us_fallback_roundtrip.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW,
     1024,
     4096);
 }
@@ -1848,7 +1942,7 @@ TEST_F(ParquetCpuEncoderTest,
   roundtrip_single_column_typed_expect_not_encoding<cudf::duration_us>(
     values,
     "test_fastlanes_duration_us_negative_fallback_roundtrip.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW,
     1024,
     4096);
 }
@@ -1863,7 +1957,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesDurationNanosecondsLogicalTypeFallsBackFr
   roundtrip_single_column_typed_expect_not_encoding<cudf::duration_ns>(
     values,
     "test_fastlanes_duration_ns_fallback_roundtrip.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW,
     1024,
     4096);
 }
@@ -1883,7 +1977,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesDurationNanosecondsNegativeLogicalTypeFal
   roundtrip_single_column_typed_expect_not_encoding<cudf::duration_ns>(
     values,
     "test_fastlanes_duration_ns_negative_fallback_roundtrip.parquet",
-    cudf::io::parquet::Encoding::FASTLANES_BITPACK,
+    cudf::io::parquet::Encoding::FASTLANE_BITPACK_RAW,
     1024,
     4096);
 }
@@ -1946,15 +2040,15 @@ TEST_F(ParquetCpuEncoderTest, FastLanesMixedEncodingsLowCardinalityInt32Pattern)
   metadata.column_metadata[1].set_name("l_partkey");
   metadata.column_metadata[1].set_encoding(cudf::io::column_encoding::DELTA_BINARY_PACKED);
   metadata.column_metadata[2].set_name("l_returnflag");
-  metadata.column_metadata[2].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[2].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
   metadata.column_metadata[3].set_name("l_linestatus");
-  metadata.column_metadata[3].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[3].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
   metadata.column_metadata[4].set_name("l_shipdate");
   metadata.column_metadata[4].set_encoding(cudf::io::column_encoding::DICTIONARY);
   metadata.column_metadata[5].set_name("l_shipinstruct");
-  metadata.column_metadata[5].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[5].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
   metadata.column_metadata[6].set_name("l_shipmode");
-  metadata.column_metadata[6].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  metadata.column_metadata[6].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
 
   roundtrip_with_metadata(
     input, metadata, "test_fastlanes_mixed_low_cardinality_pattern.parquet", 1024, 4096);

@@ -501,15 +501,8 @@ CUDF_KERNEL void __launch_bounds__(128)
   }
 }
 
-CUDF_HOST_DEVICE constexpr bool is_fastlanes_bitpack_supported_logical(Type physical_type,
-                                                                        cudf::type_id logical_type)
+CUDF_HOST_DEVICE constexpr bool is_fastlanes_bitpack_raw_supported_logical(cudf::type_id logical_type)
 {
-  if (physical_type == Type::INT64) {
-    return logical_type == cudf::type_id::INT64 || logical_type == cudf::type_id::UINT64;
-  }
-
-  if (physical_type != Type::INT32) { return false; }
-
   switch (logical_type) {
     case cudf::type_id::INT8:
     case cudf::type_id::UINT8:
@@ -526,18 +519,35 @@ CUDF_HOST_DEVICE constexpr bool is_fastlanes_bitpack_supported_logical(Type phys
   }
 }
 
+CUDF_HOST_DEVICE constexpr bool is_fastlanes_bitpack_split64_supported_logical(
+  cudf::type_id logical_type)
+{
+  return logical_type == cudf::type_id::INT64 || logical_type == cudf::type_id::UINT64;
+}
+
 CUDF_HOST_DEVICE constexpr bool is_fastlanes_flat_column(int32_t max_rep_level)
 {
   return max_rep_level == 0;
 }
 
-CUDF_HOST_DEVICE constexpr bool is_fastlanes_bitpack_runtime_supported(
+CUDF_HOST_DEVICE constexpr bool is_fastlanes_bitpack_raw_runtime_supported(
   Type physical_type,
   cudf::type_id logical_type,
   int32_t max_rep_level)
 {
   return is_fastlanes_flat_column(max_rep_level) &&
-         is_fastlanes_bitpack_supported_logical(physical_type, logical_type);
+         physical_type == Type::INT32 &&
+         is_fastlanes_bitpack_raw_supported_logical(logical_type);
+}
+
+CUDF_HOST_DEVICE constexpr bool is_fastlanes_bitpack_split64_runtime_supported(
+  Type physical_type,
+  cudf::type_id logical_type,
+  int32_t max_rep_level)
+{
+  return is_fastlanes_flat_column(max_rep_level) &&
+         physical_type == Type::INT64 &&
+         is_fastlanes_bitpack_split64_supported_logical(logical_type);
 }
 
 CUDF_HOST_DEVICE constexpr bool is_fastlanes_delta_binary_supported(Type physical_type,
@@ -545,6 +555,38 @@ CUDF_HOST_DEVICE constexpr bool is_fastlanes_delta_binary_supported(Type physica
 {
   return is_fastlanes_flat_column(max_rep_level) &&
          (physical_type == Type::INT32 || physical_type == Type::INT64);
+}
+
+CUDF_HOST_DEVICE constexpr uint32_t fastlanes_bitpack_kernel_masks()
+{
+  return BitOr(
+    encode_kernel_mask::FASTLANE_BITPACK_RAW, encode_kernel_mask::FASTLANE_BITPACK_SPLIT64);
+}
+
+CUDF_HOST_DEVICE constexpr bool is_fastlanes_bitpack_mask(encode_kernel_mask kernel_mask)
+{
+  return BitAnd(kernel_mask, fastlanes_bitpack_kernel_masks()) != 0;
+}
+
+CUDF_HOST_DEVICE constexpr Encoding fastlanes_encoding_for_mask(encode_kernel_mask kernel_mask)
+{
+  return BitAnd(kernel_mask, encode_kernel_mask::FASTLANE_BITPACK_SPLIT64) != 0
+           ? Encoding::FASTLANE_BITPACK_SPLIT64
+           : Encoding::FASTLANE_BITPACK_RAW;
+}
+
+CUDF_HOST_DEVICE constexpr size_t fastlanes_component_streams_for_mask(
+  encode_kernel_mask kernel_mask,
+  Type physical_type)
+{
+  if (kernel_mask == encode_kernel_mask::FASTLANE_BITPACK_SPLIT64) { return size_t{2}; }
+
+  if (kernel_mask == encode_kernel_mask::FASTLANE_BITPACK_RAW) {
+    // Defensive fallback: avoid under-allocation if an unexpected INT64 raw request slips through.
+    return physical_type == Type::INT64 ? size_t{2} : size_t{1};
+  }
+
+  return size_t{0};
 }
 
 // given a column chunk, determine which data encoding to use
@@ -567,14 +609,22 @@ __device__ encode_kernel_mask data_encoding_for_col(EncColumnChunk const* chunk,
       case column_encoding::DELTA_LENGTH_BYTE_ARRAY: return encode_kernel_mask::DELTA_LENGTH_BA;
       case column_encoding::DELTA_BYTE_ARRAY: return encode_kernel_mask::DELTA_BYTE_ARRAY;
       case column_encoding::BYTE_STREAM_SPLIT: return encode_kernel_mask::BYTE_STREAM_SPLIT;
-      case column_encoding::FASTLANES_BITPACK: {
+      case column_encoding::FASTLANE_BITPACK_RAW: {
         auto const leaf_type = col_desc->leaf_column->type().id();
-        // Runtime gate mirrors schema validation: flat INT32/INT64 physical columns use FastLanes.
-        if (is_fastlanes_bitpack_runtime_supported(
+        if (is_fastlanes_bitpack_raw_runtime_supported(
               col_desc->physical_type, leaf_type, col_desc->max_rep_level)) {
-          return encode_kernel_mask::FASTLANES_BITPACK;
+          return encode_kernel_mask::FASTLANE_BITPACK_RAW;
         }
-        // Fallback to PLAIN if constraints not met
+        // Explicit fallback for RAW mode if runtime constraints are not met.
+        return encode_kernel_mask::PLAIN;
+      }
+      case column_encoding::FASTLANE_BITPACK_SPLIT64: {
+        auto const leaf_type = col_desc->leaf_column->type().id();
+        if (is_fastlanes_bitpack_split64_runtime_supported(
+              col_desc->physical_type, leaf_type, col_desc->max_rep_level)) {
+          return encode_kernel_mask::FASTLANE_BITPACK_SPLIT64;
+        }
+        // Explicit fallback for SPLIT64 mode if runtime constraints are not met.
         return encode_kernel_mask::PLAIN;
       }
       case column_encoding::FASTLANES_DELTA_BINARY: {
@@ -892,18 +942,18 @@ CUDF_KERNEL void __launch_bounds__(128)
           //   would write past the allocated page buffer.
           //
           // We intentionally use a conservative 32-bit bound per component stream.
-          // INT64 split32 pages reserve two such streams.
+          // RAW mode reserves one stream, SPLIT64 mode reserves two streams.
           // TODO: tighten this reservation once we have page-level exact pre-size metadata.
           constexpr uint8_t max_fastlanes_bitwidth = 32;
           auto const fastlanes_num_vectors =
             (static_cast<size_t>(page_g.num_leaf_values) + size_t{1023}) / size_t{1024};
           auto const fastlanes_component_streams =
-            (physical_type == Type::INT64) ? size_t{2} : size_t{1};
+            fastlanes_component_streams_for_mask(column_data_encoding, physical_type);
           auto const fastlanes_body_size = fastlanes_num_vectors * size_t{1024} *
                                            max_fastlanes_bitwidth *
                                            fastlanes_component_streams / size_t{8};
           auto const fastlanes_reserved_size =
-            (column_data_encoding == encode_kernel_mask::FASTLANES_BITPACK)
+            is_fastlanes_bitpack_mask(column_data_encoding)
               ? fastlanes::PageHeader::header_size() +
                   fastlanes_body_size
               : size_t{0};
@@ -2845,7 +2895,7 @@ CUDF_KERNEL void __launch_bounds__(block_size, 8)
   }
   __syncthreads();
 
-  if (BitAnd(s->page.kernel_mask, encode_kernel_mask::FASTLANES_BITPACK) == 0) { return; }
+  if (not is_fastlanes_bitpack_mask(s->page.kernel_mask)) { return; }
 
   if (t == 0) {
     uint8_t* dst       = s->cur;
@@ -2853,7 +2903,7 @@ CUDF_KERNEL void __launch_bounds__(block_size, 8)
     s->rle_pos         = 0;
     s->rle_numvals     = 0;
     s->rle_out         = dst;
-    s->page.encoding   = Encoding::FASTLANES_BITPACK;
+    s->page.encoding   = fastlanes_encoding_for_mask(s->page.kernel_mask);
     s->page_start_val  = row_to_value_idx(s->page.start_row, s->col);
     s->chunk_start_val = row_to_value_idx(s->ck.start_row, s->col);
   }
@@ -3782,9 +3832,12 @@ void EncodePages(device_span<EncPage> pages,
   // determine which kernels to invoke
   auto kernel_mask = cudf::detail::transform_reduce(
     pages.begin(), pages.end(), mask_tform{}, uint32_t{0}, cuda::std::bit_or<uint32_t>{}, stream);
+  auto constexpr fastlanes_kernel_mask_bits = fastlanes_bitpack_kernel_masks();
+  auto const has_fastlanes_bitpack          = (kernel_mask & fastlanes_kernel_mask_bits) != 0;
 
   // get the number of streams we need from the pool
   int nkernels = std::bitset<32>(kernel_mask).count();
+  if ((kernel_mask & fastlanes_kernel_mask_bits) == fastlanes_kernel_mask_bits) { nkernels--; }
   auto streams = cudf::detail::fork_streams(stream, nkernels);
 
   // A page is part of one column. This is launching 1 block per page. 1 block will exclusively
@@ -3836,7 +3889,7 @@ void EncodePages(device_span<EncPage> pages,
   // ========================================
   // CPU FastLanes BitPacking Encoding Block
   // ========================================
-  if (BitAnd(kernel_mask, encode_kernel_mask::FASTLANES_BITPACK) != 0) {
+  if (has_fastlanes_bitpack) {
     auto const strm = streams[s_idx++];
 
     // 1. Copy page metadata to host
@@ -3874,7 +3927,7 @@ void EncodePages(device_span<EncPage> pages,
     // 3. Process each page individually with simple type dispatch.
     std::unordered_map<uint32_t, uint32_t> chunk_page_counters;
     for (size_t page_idx = 0; page_idx < num_pages; ++page_idx) {
-      if (BitAnd(h_pages[page_idx].kernel_mask, encode_kernel_mask::FASTLANES_BITPACK) == 0) {
+      if (not is_fastlanes_bitpack_mask(h_pages[page_idx].kernel_mask)) {
         continue;
       }
 
@@ -3927,19 +3980,26 @@ void EncodePages(device_span<EncPage> pages,
         auto result = get_encoder_i32().encode_page(
           reinterpret_cast<int32_t const*>(d_gather_buffer.data()), num_values, strm);
 
+        auto const hdr = fastlanes::PageHeader::deserialize(result.host_blob.data());
+        auto const split64_mode =
+          fastlanes_encoding_for_mask(h_pages[page_idx].kernel_mask) ==
+          Encoding::FASTLANE_BITPACK_SPLIT64;
+        if (!fastlanes::is_pre_delta_valid_for_mode(split64_mode, hdr.pre_delta)) {
+          throw std::invalid_argument(
+            "FastLanes: invalid PRE_DELTA policy for selected page encoding mode");
+        }
+
         if (fastlanes::debug::is_workload_enabled()) {
-          auto const hdr = fastlanes::PageHeader::deserialize(result.host_blob.data());
           auto const* payload_u32 = reinterpret_cast<uint32_t const*>(
             fastlanes::PageHeader::payload_ptr(result.host_blob.data()));
+          auto const page_mode_name = split64_mode ? "SPLIT64" : "RAW";
           std::cout << "[FL ENCODED  ] page=" << page_idx << " chunk=" << chunk_id
                     << " chunk_page=" << chunk_page_index
-                    << " layout="
-                    << fastlanes::debug::layout_mode_str(static_cast<uint8_t>(hdr.layout_mode))
-                    << " bw_mode="
-                    << fastlanes::debug::bitwidth_mode_str(static_cast<uint8_t>(hdr.bitwidth_mode))
+                    << " mode=" << page_mode_name
+                    << " pre_delta=" << (hdr.pre_delta ? "true" : "false")
                     << " cast=" << fastlanes::debug::cast_mode_str(result.cast_mode)
                     << " hdr=" << fastlanes::PageHeader::header_size()
-                    << " bw=" << static_cast<int>(hdr.bitwidth)
+                    << " bw=" << static_cast<int>(hdr.component_bitwidth_low)
                     << " orig=" << hdr.original_count << " pad=" << hdr.padded_count
                     << " body=" << hdr.body_size << " min=0x" << std::hex
                     << hdr.min_value_bits()
@@ -3981,16 +4041,23 @@ void EncodePages(device_span<EncPage> pages,
         auto result = get_encoder_i64().encode_page(
           reinterpret_cast<int64_t const*>(d_gather_buffer.data()), num_values, strm);
 
+        auto const hdr = fastlanes::PageHeader::deserialize(result.host_blob.data());
+        auto const split64_mode =
+          fastlanes_encoding_for_mask(h_pages[page_idx].kernel_mask) ==
+          Encoding::FASTLANE_BITPACK_SPLIT64;
+        if (!fastlanes::is_pre_delta_valid_for_mode(split64_mode, hdr.pre_delta)) {
+          throw std::invalid_argument(
+            "FastLanes: invalid PRE_DELTA policy for selected page encoding mode");
+        }
+
         if (fastlanes::debug::is_workload_enabled()) {
-          auto const hdr = fastlanes::PageHeader::deserialize(result.host_blob.data());
           auto const* payload_u32 = reinterpret_cast<uint32_t const*>(
             fastlanes::PageHeader::payload_ptr(result.host_blob.data()));
+          auto const page_mode_name = split64_mode ? "SPLIT64" : "RAW";
           std::cout << "[FL ENCODED  ] page=" << page_idx << " chunk=" << chunk_id
                     << " chunk_page=" << chunk_page_index
-                    << " layout="
-                    << fastlanes::debug::layout_mode_str(static_cast<uint8_t>(hdr.layout_mode))
-                    << " bw_mode="
-                    << fastlanes::debug::bitwidth_mode_str(static_cast<uint8_t>(hdr.bitwidth_mode))
+                    << " mode=" << page_mode_name
+                    << " pre_delta=" << (hdr.pre_delta ? "true" : "false")
                     << " cast=" << fastlanes::debug::cast_mode_str(result.cast_mode)
                     << " hdr=" << fastlanes::PageHeader::header_size()
                     << " bw_lo=" << static_cast<int>(hdr.component_bitwidth_low)
@@ -4047,7 +4114,9 @@ void EncodePages(device_span<EncPage> pages,
 
     // 6. Launch Page Levels Encoder
     gpuEncodePageLevels<encode_block_size><<<num_pages, encode_block_size, 0, strm.value()>>>(
-      pages, write_v2_headers, encode_kernel_mask::FASTLANES_BITPACK);
+      pages,
+      write_v2_headers,
+      static_cast<encode_kernel_mask>(fastlanes_kernel_mask_bits));
 
     // 7. Launch Copy Kernel
     gpuEncodeCpuPages<encode_block_size><<<num_pages, encode_block_size, 0, strm.value()>>>(

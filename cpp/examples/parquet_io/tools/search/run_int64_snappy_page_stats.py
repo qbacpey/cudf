@@ -3,7 +3,7 @@
 
 What this script does:
 1. Builds a baseline encoding map where all INT64 columns use DELTA_BINARY_PACKED.
-2. Runs one-by-one FASTLANES_BITPACK toggles for selected INT64 columns.
+2. Runs one-by-one FASTLANE_BITPACK_SPLIT64 toggles for selected INT64 columns.
 3. Optionally runs an aggregate all-int64-fastlane control case.
 4. Persists outputs in a 3-layer artifact layout for human + machine + raw data.
 
@@ -200,13 +200,13 @@ def _make_case_maps(input_file: Path, int64_targets: List[str], include_all_fast
 
     for col in int64_targets:
         case_map = dict(base_map)
-        case_map[col] = "FASTLANES_BITPACK"
+        case_map[col] = "FASTLANE_BITPACK_SPLIT64"
         cases.append((f"{col}_fastlane", case_map))
 
     if include_all_fastlane:
         all_map = dict(base_map)
         for col in int64_targets:
-            all_map[col] = "FASTLANES_BITPACK"
+            all_map[col] = "FASTLANE_BITPACK_SPLIT64"
         cases.append(("all_int64_fastlane", all_map))
 
     # Normalize map ordering now so all downstream hashes/specs are stable.

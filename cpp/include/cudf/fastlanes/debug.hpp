@@ -105,9 +105,9 @@ inline const char* cast_mode_str(TypeCastMode mode)
 inline const char* layout_mode_str(uint8_t mode)
 {
   switch (mode) {
-    case static_cast<uint8_t>(PageLayoutMode::SCALAR32): return "SCALAR32";
-    case static_cast<uint8_t>(PageLayoutMode::SPLIT32): return "SPLIT32";
-    case static_cast<uint8_t>(PageLayoutMode::NATIVE64): return "NATIVE64";
+    case 1: return "SCALAR32";
+    case 2: return "SPLIT32";
+    case 3: return "NATIVE64";
     default: return "UNKNOWN";
   }
 }
@@ -115,8 +115,8 @@ inline const char* layout_mode_str(uint8_t mode)
 inline const char* bitwidth_mode_str(uint8_t mode)
 {
   switch (mode) {
-    case static_cast<uint8_t>(BitwidthMode::SINGLE): return "SINGLE";
-    case static_cast<uint8_t>(BitwidthMode::SPLIT_COMPONENTS): return "SPLIT_COMPONENTS";
+    case 1: return "SINGLE";
+    case 2: return "SPLIT_COMPONENTS";
     default: return "UNKNOWN";
   }
 }
@@ -268,8 +268,9 @@ struct PageDebugInfo {
   // --- FastLanes header fields (always present when page_valid) ---
   uint8_t bitwidth;
   uint8_t cast_mode;  ///< TypeCastMode as uint8_t for device compatibility
-  uint8_t layout_mode;
-  uint8_t bitwidth_mode;
+  uint8_t layout_mode;    ///< Effective mode derived from external page encoding
+  uint8_t bitwidth_mode;  ///< Effective mode derived from external page encoding
+  bool pre_delta;
   uint8_t component_bitwidth_low;
   uint8_t component_bitwidth_high;
   uint32_t original_count;
@@ -310,11 +311,13 @@ struct PageDebugInfo {
 inline PageDebugInfo make_debug_info(const PageHeader& hdr)
 {
   PageDebugInfo info{};
+  auto const split64_mode = hdr.component_bitwidth_high != 0;
   info.page_valid     = true;
-  info.bitwidth       = hdr.bitwidth;
+  info.bitwidth       = hdr.component_bitwidth_low;
   info.cast_mode      = 0;
-  info.layout_mode    = static_cast<uint8_t>(hdr.layout_mode);
-  info.bitwidth_mode  = static_cast<uint8_t>(hdr.bitwidth_mode);
+  info.layout_mode    = static_cast<uint8_t>(split64_mode ? 2 : 1);
+  info.bitwidth_mode  = static_cast<uint8_t>(split64_mode ? 2 : 1);
+  info.pre_delta      = hdr.pre_delta;
   info.component_bitwidth_low  = hdr.component_bitwidth_low;
   info.component_bitwidth_high = hdr.component_bitwidth_high;
   info.original_count = hdr.original_count;
@@ -342,8 +345,9 @@ inline PageDebugInfo make_debug_info(uint8_t bw,
   info.page_valid     = true;
   info.bitwidth       = bw;
   info.cast_mode      = static_cast<uint8_t>(mode);
-  info.layout_mode    = static_cast<uint8_t>(PageLayoutMode::SCALAR32);
-  info.bitwidth_mode  = static_cast<uint8_t>(BitwidthMode::SINGLE);
+  info.layout_mode    = static_cast<uint8_t>(1);
+  info.bitwidth_mode  = static_cast<uint8_t>(1);
+  info.pre_delta      = true;
   info.component_bitwidth_low  = bw;
   info.component_bitwidth_high = 0;
   info.original_count = orig_count;
@@ -415,10 +419,11 @@ inline void print_fl_header(std::ostream& os, const PageDebugInfo& info)
   auto const restore_fill = os.fill();
   os << "\n--- FastLanes Page Header ---\n"
      << "  bitwidth        : " << static_cast<int>(info.bitwidth) << "\n"
-     << "  layout_mode     : " << static_cast<int>(info.layout_mode)
+    << "  mode(layout)    : " << static_cast<int>(info.layout_mode)
      << " (" << layout_mode_str(info.layout_mode) << ")\n"
-     << "  bitwidth_mode   : " << static_cast<int>(info.bitwidth_mode)
+    << "  mode(bitwidth)  : " << static_cast<int>(info.bitwidth_mode)
      << " (" << bitwidth_mode_str(info.bitwidth_mode) << ")\n"
+      << "  pre_delta       : " << (info.pre_delta ? "true" : "false") << "\n"
      << "  bitwidth_lo/hi  : " << static_cast<int>(info.component_bitwidth_low) << "/"
      << static_cast<int>(info.component_bitwidth_high) << "\n"
      << "  original_count  : " << info.original_count << "\n"

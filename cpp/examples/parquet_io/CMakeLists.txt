@@ -66,5 +66,22 @@ target_link_libraries(
 target_compile_features(parquet_io_multithreaded PRIVATE cxx_std_20)
 install(TARGETS parquet_io_multithreaded DESTINATION bin/examples/libcudf/parquet_io)
 
+# Build and install fastlane_int64_cpu_roundtrip
+add_executable(
+  fastlane_int64_cpu_roundtrip
+  fastlane_int64_cpu_roundtrip.cpp
+  ../../src/fastlanes/pack.cpp
+  ../../src/fastlanes/unpack.cpp
+  ../../src/fastlanes/ffor.cpp
+  ../../src/fastlanes/ffor_wrappers.cpp
+  ../../src/fastlanes/unffor.cpp
+  ../../src/fastlanes/unffor_wrappers.cpp
+)
+target_link_libraries(
+  fastlane_int64_cpu_roundtrip PRIVATE cudf::cudf $<BUILD_LOCAL_INTERFACE:nvtx3::nvtx3-cpp>
+)
+target_compile_features(fastlane_int64_cpu_roundtrip PRIVATE cxx_std_20)
+install(TARGETS fastlane_int64_cpu_roundtrip DESTINATION bin/examples/libcudf/parquet_io)
+
 # Install the example.parquet file
 install(FILES ${CMAKE_CURRENT_LIST_DIR}/example.parquet DESTINATION bin/examples/libcudf/parquet_io)

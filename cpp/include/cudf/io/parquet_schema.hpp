@@ -82,19 +82,20 @@ enum class ConvertedType : int8_t {
  * @brief Encoding types for the actual data stream
  */
 enum class Encoding : uint8_t {
-  PLAIN                   = 0,
-  GROUP_VAR_INT           = 1,  // Deprecated, never used
-  PLAIN_DICTIONARY        = 2,
-  RLE                     = 3,
-  BIT_PACKED              = 4,  // Deprecated by parquet-format in 2013, superseded by RLE
-  DELTA_BINARY_PACKED     = 5,
-  DELTA_LENGTH_BYTE_ARRAY = 6,
-  DELTA_BYTE_ARRAY        = 7,
-  RLE_DICTIONARY          = 8,
-  BYTE_STREAM_SPLIT       = 9,
-  NUM_ENCODINGS           = 10,
-  FASTLANES_BITPACK       = 11,
-  FASTLANES_DELTA_BINARY  = 12,
+  PLAIN                    = 0,
+  GROUP_VAR_INT            = 1,  // Deprecated, never used
+  PLAIN_DICTIONARY         = 2,
+  RLE                      = 3,
+  BIT_PACKED               = 4,  // Deprecated by parquet-format in 2013, superseded by RLE
+  DELTA_BINARY_PACKED      = 5,
+  DELTA_LENGTH_BYTE_ARRAY  = 6,
+  DELTA_BYTE_ARRAY         = 7,
+  RLE_DICTIONARY           = 8,
+  BYTE_STREAM_SPLIT        = 9,
+  FASTLANE_BITPACK_RAW     = 10,
+  FASTLANES_DELTA_BINARY   = 11,
+  FASTLANE_BITPACK_SPLIT64 = 12,
+  NUM_ENCODINGS            = 13,  // Not an actual encoding, used for iteration and validation
 };
 
 /**

@@ -1932,6 +1932,54 @@ TEST_F(ParquetWriterTest, UserRequestedEncodings)
     return enc == Encoding::DELTA_BINARY_PACKED;
   });
   EXPECT_TRUE(has_delta);
+
+  auto const int64_col =
+    cudf::test::fixed_width_column_wrapper<int64_t>{ones, ones + num_rows, no_nulls()};
+  auto const int64_table = table_view({int64_col});
+
+  {
+    cudf::io::table_input_metadata int64_metadata(int64_table);
+    int64_metadata.column_metadata[0]
+      .set_name("int64_fastlane_bitpack_raw")
+      .set_encoding(column_encoding::FASTLANE_BITPACK_RAW)
+      .set_nullability(false);
+
+    auto const filepath_int64_bitpack =
+      temp_env->get_temp_filepath("UserRequestedInt64FastLanesBitpack.parquet");
+    cudf::io::parquet_writer_options int64_bitpack_opts =
+      cudf::io::parquet_writer_options::builder(cudf::io::sink_info{filepath_int64_bitpack},
+                                                int64_table)
+        .metadata(int64_metadata);
+
+    cudf::test::log_capture log_cap{};
+    cudf::io::write_parquet(int64_bitpack_opts);
+    EXPECT_TRUE(log_cap.has_messages());
+
+    auto const source_int64_bitpack = cudf::io::datasource::create(filepath_int64_bitpack);
+    cudf::io::parquet::FileMetaData int64_bitpack_fmd;
+    read_footer(source_int64_bitpack, &int64_bitpack_fmd);
+    EXPECT_NE(int64_bitpack_fmd.row_groups[0].columns[0].meta_data.encodings[0],
+              Encoding::FASTLANE_BITPACK_RAW);
+  }
+
+  {
+    cudf::io::table_input_metadata int64_metadata(int64_table);
+    int64_metadata.column_metadata[0]
+      .set_name("int64_fastlane_bitpack_split64")
+      .set_encoding(column_encoding::FASTLANE_BITPACK_SPLIT64)
+      .set_nullability(false);
+
+    auto const filepath_int64_split64 =
+      temp_env->get_temp_filepath("UserRequestedInt64FastLanesSplit64.parquet");
+    cudf::io::parquet_writer_options int64_split64_opts =
+      cudf::io::parquet_writer_options::builder(cudf::io::sink_info{filepath_int64_split64},
+                                                int64_table)
+        .metadata(int64_metadata);
+
+    cudf::test::log_capture log_cap{};
+    cudf::io::write_parquet(int64_split64_opts);
+    EXPECT_FALSE(log_cap.has_messages());
+  }
 }
 
 TEST_F(ParquetWriterTest, ListElementFieldIds)

@@ -38,7 +38,7 @@ chunked and suitable for very large files.
 
 ## FastLanes Eligibility Rule (Current)
 
-By default, the search script treats FASTLANES_BITPACK as a candidate only for:
+By default, the search script treats FASTLANE_BITPACK_RAW as a candidate only for:
 
 - Physical INT32
 - Logical INT32

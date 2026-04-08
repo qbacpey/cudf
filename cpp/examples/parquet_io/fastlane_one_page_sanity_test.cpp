@@ -244,7 +244,11 @@ bool run_one_page_test(const std::string& type_name, bool use_random = false)
 
   cudf::io::table_input_metadata metadata(input);
   metadata.column_metadata[0].set_name("test_" + type_name);
-  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  auto const requested_encoding =
+    (std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>)
+      ? cudf::io::column_encoding::FASTLANE_BITPACK_SPLIT64
+      : cudf::io::column_encoding::FASTLANE_BITPACK_RAW;
+  metadata.column_metadata[0].set_encoding(requested_encoding);
 
   std::string filepath = "fastlanes_" + type_name + "_test.parquet";
   cudf::io::parquet_writer_options out_opts =
@@ -252,7 +256,11 @@ bool run_one_page_test(const std::string& type_name, bool use_random = false)
       .metadata(metadata)
       .write_v2_headers(true);
 
-  std::cout << "Writing parquet file with FASTLANES_BITPACK...\n";
+    std::cout << "Writing parquet file with "
+      << (requested_encoding == cudf::io::column_encoding::FASTLANE_BITPACK_SPLIT64
+        ? "FASTLANE_BITPACK_SPLIT64"
+        : "FASTLANE_BITPACK_RAW")
+      << "...\n";
   cudf::io::write_parquet(out_opts);
   std::cout << "Write complete!\n\n";
 

@@ -196,11 +196,11 @@ def _is_time_millis_like(col: ColumnInfo) -> bool:
 
 def _candidate_encodings(col: ColumnInfo, allow_future_fastlanes: bool = False) -> List[str]:
     if _is_fastlanes_eligible_int32(col):
-        return ["FASTLANES_BITPACK", "DICTIONARY", "DELTA_BINARY_PACKED"]
+        return ["FASTLANE_BITPACK_RAW", "DICTIONARY", "DELTA_BINARY_PACKED"]
 
     # Keep this hook for future extension once more INT32 logical classes are validated.
     if allow_future_fastlanes and col.physical_type == "INT32":
-        return ["FASTLANES_BITPACK", "DICTIONARY", "DELTA_BINARY_PACKED"]
+        return ["FASTLANE_BITPACK_RAW", "DICTIONARY", "DELTA_BINARY_PACKED"]
 
     if col.physical_type == "INT32":
         return ["DICTIONARY", "DELTA_BINARY_PACKED"]
@@ -371,7 +371,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--allow-future-fastlanes",
         action="store_true",
         help=(
-            "Also include FASTLANES_BITPACK candidate for INT32 columns that are not currently "
+            "Also include FASTLANE_BITPACK_RAW candidate for INT32 columns that are not currently "
             "in the supported logical-class set."
         ),
     )

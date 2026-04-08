@@ -178,7 +178,11 @@ bool run_single_type_test(const TestConfig& config)
   // Setup metadata
   cudf::io::table_input_metadata metadata(input);
   metadata.column_metadata[0].set_name(config.name);
-  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+  auto const requested_encoding =
+    (config.type_id == cudf::type_id::INT64 || config.type_id == cudf::type_id::UINT64)
+      ? cudf::io::column_encoding::FASTLANE_BITPACK_SPLIT64
+      : cudf::io::column_encoding::FASTLANE_BITPACK_RAW;
+  metadata.column_metadata[0].set_encoding(requested_encoding);
 
   // Write
   std::string filepath = "test_" + config.name + ".parquet";

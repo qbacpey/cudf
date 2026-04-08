@@ -879,17 +879,33 @@ std::vector<schema_tree_node> construct_parquet_schema_tree(
             case column_encoding::PLAIN:
             case column_encoding::DICTIONARY: break;
 
-            case column_encoding::FASTLANES_BITPACK:
-              if (s.type != Type::INT32 && s.type != Type::INT64) {
+            case column_encoding::FASTLANE_BITPACK_RAW:
+              if (s.type != Type::INT32) {
                 CUDF_LOG_WARN(
-                  "FASTLANES_BITPACK encoding is only supported for INT32/INT64 columns; the "
+                  "FASTLANE_BITPACK_RAW encoding is only supported for INT32 columns; the "
                   "requested encoding will be ignored");
                 return;
               }
               if (!is_fastlanes_bitpack_supported_schema(
                     s.type, s.leaf_column->type().id(), s.logical_type, s.converted_type)) {
                 CUDF_LOG_WARN(
-                  "FASTLANES_BITPACK encoding is unsupported for this logical type; "
+                  "FASTLANE_BITPACK_RAW encoding is unsupported for this logical type; "
+                  "the requested encoding will be ignored");
+                return;
+              }
+              break;
+
+            case column_encoding::FASTLANE_BITPACK_SPLIT64:
+              if (s.type != Type::INT64) {
+                CUDF_LOG_WARN(
+                  "FASTLANE_BITPACK_SPLIT64 encoding is only supported for INT64 columns; the "
+                  "requested encoding will be ignored");
+                return;
+              }
+              if (!is_fastlanes_bitpack_supported_schema(
+                    s.type, s.leaf_column->type().id(), s.logical_type, s.converted_type)) {
+                CUDF_LOG_WARN(
+                  "FASTLANE_BITPACK_SPLIT64 encoding is unsupported for this logical type; "
                   "the requested encoding will be ignored");
                 return;
               }

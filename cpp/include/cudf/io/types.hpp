@@ -109,8 +109,9 @@ enum class column_encoding : int32_t {
   DIRECT_V2,      ///< Use DIRECT_V2 encoding
   DICTIONARY_V2,  ///< Use DICTIONARY_V2 encoding
   // Custom encodings:
-  FASTLANES_BITPACK,
+  FASTLANE_BITPACK_RAW,
   FASTLANES_DELTA_BINARY,
+  FASTLANE_BITPACK_SPLIT64,
 };
 
 /**

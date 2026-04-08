@@ -291,7 +291,12 @@ bool run_multi_column_test(const TestConfig& config)
   cudf::io::table_input_metadata metadata(input);
   for (size_t i = 0; i < config.columns.size(); ++i) {
     metadata.column_metadata[i].set_name(config.columns[i].name);
-    metadata.column_metadata[i].set_encoding(cudf::io::column_encoding::FASTLANES_BITPACK);
+    auto const requested_encoding =
+      (config.columns[i].type_id == cudf::type_id::INT64 ||
+       config.columns[i].type_id == cudf::type_id::UINT64)
+        ? cudf::io::column_encoding::FASTLANE_BITPACK_SPLIT64
+        : cudf::io::column_encoding::FASTLANE_BITPACK_RAW;
+    metadata.column_metadata[i].set_encoding(requested_encoding);
   }
 
   // Write

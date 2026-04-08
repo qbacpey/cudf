@@ -212,7 +212,8 @@ class FastLanesEncoder {
       static_cast<uint32_t>(padded),
       static_cast<uint32_t>(normalized.min_value),
       reinterpret_cast<const uint8_t*>(encoded_body.data()),
-      encoded_bytes);
+      encoded_bytes,
+      fastlanes::default_pre_delta_for_mode(false));
     upload_encoded_blob(result, stream);
 
     result.bitwidth       = bitwidth;
@@ -267,7 +268,9 @@ class FastLanesEncoder {
                                                                  split.min_low_bits,
                                                                  split.min_high_bits,
                                                                  encoded_body.data(),
-                                                                 encoded_body.size());
+                                                                 encoded_body.size(),
+                                                                 fastlanes::default_pre_delta_for_mode(
+                                                                   true));
     upload_encoded_blob(result, stream);
 
     result.bitwidth       = split.bitwidth_low > split.bitwidth_high ? split.bitwidth_low
@@ -447,9 +450,25 @@ class FastLanesEncoder {
     // Create minimal blob with just header (no body)
     if constexpr (std::is_same_v<T, int64_t>) {
       result.host_blob =
-        fastlanes::PageHeader::serialize_split32(1, 1, 0, 0, 0, 0, nullptr, 0);
+        fastlanes::PageHeader::serialize_split32(
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          nullptr,
+          0,
+          fastlanes::default_pre_delta_for_mode(true));
     } else {
-      result.host_blob = fastlanes::PageHeader::serialize_scalar32(1, 0, 0, 0, nullptr, 0);
+      result.host_blob = fastlanes::PageHeader::serialize_scalar32(
+        1,
+        0,
+        0,
+        0,
+        nullptr,
+        0,
+        fastlanes::default_pre_delta_for_mode(false));
     }
 
     result.device_blob = rmm::device_buffer(result.host_blob.size(), stream);
