@@ -348,7 +348,10 @@ ConfigureTest(
 ConfigureTest(
   PARQUET_FASTLANES_TEST
   io/parquet_common.cpp
+  io/parquet_fastlanes_native64_bw37_test.cu
   io/parquet_fastlanes_test.cpp
+  ../src/fastlanes/pack.cpp
+  ../src/fastlanes/unpack.cpp
   GPUS 1
   PERCENT 100
 )
