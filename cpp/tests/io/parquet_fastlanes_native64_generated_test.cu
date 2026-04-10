@@ -191,7 +191,7 @@ enum class data_pattern : uint8_t { randomized, adversarial, pathological };
   return oss.str();
 }
 
-#include "fastlanes_native64_gen/generated/native64_bw_kernels.inl"
+#include <cudf/fastlanes/native64_bw_kernels.inl>
 
 struct parity_evidence {
   size_t cpu_roundtrip_mismatch{};

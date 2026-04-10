@@ -13,7 +13,7 @@ Produce an implementable and low-risk strategy to scale the FL64 prototype logic
 
 ## FL64-R3 Evidence Anchors
 - Test baseline: `cpp/tests/io/parquet_fastlanes_native64_bw37_test.cu`
-- Test CUDA helper include: `cpp/tests/io/parquet_fastlanes_native64_bw37_cuda_kernels.inl`
+- Test CUDA helper include: `cpp/include/cudf/fastlanes/parquet_fastlanes_native64_bw37_cuda_kernels.inl`
 - Fastlanes gtest target wiring: `cpp/tests/CMakeLists.txt` (`PARQUET_FASTLANES_TEST`)
 - Prior fastlanes integration report: `cpp/examples/parquet_io/docs/fastlanes/FASTLANES_INTEGRATION_REPORT_2026-03-28.md`
 - Prior split64 sensitivity report: `cpp/examples/parquet_io/docs/fastlanes/INT64_SNAPPY_DELTA_VS_FASTLANES_REPORT_2026-04-02.md`
@@ -44,12 +44,12 @@ cpp/build/gtests/PARQUET_FASTLANES_TEST --gtest_filter=ParquetFastLanesNative64B
 ## Ownership and Artifact Matrix
 | Artifact | Type | Owner | Backup Reviewer | Source of Truth | Output Path | Gate |
 |---|---|---|---|---|---|---|
-| Native64 bw spec table (bw, words_per_lane, cross-boundary map) | Generated metadata (test-only) | qbacpey | qbacpey | Script input spec | cpp/tests/io/fastlanes_native64_gen/spec/native64_bw_table.json | FL64-R4-M1 |
-| CUDA kernel include (bw0..64, test-only) | Generated code | qbacpey | qbacpey | Generator + golden snapshots | cpp/tests/io/fastlanes_native64_gen/generated/native64_bw_kernels.inl | FL64-R4-M2 |
+| Native64 bw matrix contract (bw, words_per_lane, cross-boundary map) | Embedded metadata (test-only) | qbacpey | qbacpey | Script defaults in run helper | cpp/examples/parquet_io/tools/tests/run_parity_matrix.py | FL64-R4-M1 |
+| CUDA kernel include (bw0..64, test-only) | Generated code | qbacpey | qbacpey | Finalized checked-in include | cpp/include/cudf/fastlanes/native64_bw_kernels.inl | FL64-R4-M2 |
 | CPU oracle compare harness glue | Handwritten test glue | qbacpey | qbacpey | Test source | cpp/tests/io/parquet_fastlanes_native64_generated_test.cu | FL64-R4-M2 |
-| Parity matrix executor (anchor + full sweep) | Test utility | qbacpey | qbacpey | Matrix config | cpp/tests/io/fastlanes_native64_gen/tools/run_parity_matrix.py | FL64-R4-M3 |
+| Parity matrix executor (anchor + full sweep) | Test utility | qbacpey | qbacpey | Embedded defaults + CLI overrides | cpp/examples/parquet_io/tools/tests/run_parity_matrix.py | FL64-R4-M3 |
 | Run evidence summary | Report | qbacpey | qbacpey | CI/remote logs | parquet_io_shared/reports/cudf-fastlane/<run_tag>/r4_matrix_summary.json | FL64-R4-M3 |
-| Unresolved issues log | Design note | qbacpey | qbacpey | This packet + run feedback | docs/cudf/source/developer_guide/fastlanes_native64_r4_generation_strategy.md | FL64-R4-M4 |
+| Unresolved issues log | Design note | qbacpey | qbacpey | This packet + run feedback | cpp/examples/parquet_io/docs/fastlanes/fastlanes_native64_r4_generation_strategy.md | FL64-R4-M4 |
 
 ## Generation Approach Options
 
@@ -158,11 +158,11 @@ The bw37-only suite may be considered for deprecation only after all of the foll
 
 ## Milestone Gates
 1. FL64-R4-M1 gate:
-  - `native64_bw_table.json` exists and deterministically regenerates.
+  - embedded matrix defaults in `run_parity_matrix.py` cover the required anchor and full-sweep contract.
   - Ownership row for spec artifact is explicit.
 2. FL64-R4-M2 gate:
-  - Generated include deterministically regenerates from spec + template.
-  - Anchor snapshot exists for bw 0,1,31,32,33,37,63,64.
+  - Finalized generated include exists at `cpp/include/cudf/fastlanes/native64_bw_kernels.inl`.
+  - Generated harness uses the relocated include path without semantic drift.
 3. FL64-R4-M3 gate:
   - Anchor matrix parity passes.
   - Full sweep parity matrix passes.
@@ -172,7 +172,7 @@ The bw37-only suite may be considered for deprecation only after all of the foll
 4. FL64-R4-M4 gate:
   - Matrix contract files enumerate required anchors, sweep range, scenarios, bases, counts.
 5. FL64-R4-M5 gate:
-  - `r4_matrix_summary.json` conforms to schema and report path policy.
+  - `r4_matrix_summary.json` records `all_passed` and `path_policy_ok` with required report path policy.
 6. FL64-R4-M6/M7 gate:
   - Strategy packet contains risk matrix, milestone gates, execution order, and ready-to-run packet.
 

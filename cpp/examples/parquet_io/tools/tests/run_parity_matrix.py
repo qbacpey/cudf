@@ -20,6 +20,7 @@ Typical use:
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as dt
 import json
 import os
@@ -32,6 +33,34 @@ from pathlib import Path
 from typing import Optional
 
 RUN_TAG_RE = re.compile(r"^rt_[0-9]{8}_[a-z]$")
+
+DEFAULT_MATRIX_CONFIG = {
+    "schema_version": "1.0.0",
+    "run_tag_pattern": r"^rt_[0-9]{8}_[a-z]$",
+    "report_path_pattern": "*/parquet_io_shared/reports/cudf-fastlane/<run_tag>/r4_matrix_summary.json",
+    "anchors": {
+        "bitwidths": [0, 1, 31, 32, 33, 37, 63, 64],
+        "checks": [
+            "cpu_pack_to_gpu_decode",
+            "gpu_encode_to_cpu_unpack",
+            "gpu_encode_to_gpu_decode_roundtrip",
+            "signed_int64_bitcast_parity",
+        ],
+    },
+    "full_sweep": {
+        "bitwidth_range": {"min": 0, "max": 64},
+        "patterns": ["randomized", "adversarial", "pathological"],
+        "bases": ["zero", "near_int64_min", "near_int64_max", "high_unsigned"],
+        "counts": [1023, 1024, 1025, 2047, 2048, 2049],
+    },
+    "stability": {"repeats": 3, "selected_seeds": [17, 29, 47]},
+    "gtest_filters": {
+        "anchor": "ParquetFastLanesNative64GeneratedTest.AnchorMatrixParity",
+        "full_sweep": "ParquetFastLanesNative64GeneratedTest.FullSweepParityMatrix",
+        "stability": "ParquetFastLanesNative64GeneratedTest.StabilityRepeatsSelectedSeeds",
+        "bw37_guard": "ParquetFastLanesNative64Bw37Test.*",
+    },
+}
 
 
 @dataclass
@@ -135,10 +164,7 @@ def main() -> int:
     parser.add_argument("--run-tag", required=True)
     parser.add_argument("--report-json", required=True)
     parser.add_argument("--phase", choices=["anchor", "full", "all"], default="all")
-    parser.add_argument(
-        "--config",
-        default="cpp/tests/io/fastlanes_native64_gen/config/parity_matrix.json",
-    )
+    parser.add_argument("--config", default=None)
     parser.add_argument("--with-stability", action="store_true")
     parser.add_argument("--with-bw37-guard", action="store_true")
     parser.add_argument("--with-ctest", action="store_true")
@@ -148,8 +174,9 @@ def main() -> int:
     if not RUN_TAG_RE.match(args.run_tag):
         raise SystemExit(f"run_tag must match {RUN_TAG_RE.pattern}: {args.run_tag}")
 
-    cfg_path = Path(args.config)
-    cfg = _read_json(cfg_path)
+    cfg = copy.deepcopy(DEFAULT_MATRIX_CONFIG)
+    if args.config:
+        cfg = _read_json(Path(args.config))
 
     report_json = Path(args.report_json)
     report_json.parent.mkdir(parents=True, exist_ok=True)

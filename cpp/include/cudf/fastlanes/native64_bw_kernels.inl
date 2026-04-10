@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * generated! Do not edit by hand.
- * Source template: cpp/tests/io/fastlanes_native64_gen/templates/native64_bw_kernels.inl.tmpl
+ * Source metadata helper: cpp/examples/parquet_io/tools/tests/run_parity_matrix.py
  */
 
 namespace native64_generated {
@@ -15,9 +15,6 @@ struct bw_row {
   uint8_t crossing_count;
 };
 
-inline constexpr std::array<bw_row, 65> kBwRows = {{
-{{ROW_INITIALIZERS}}
-}};
 
 template <uint8_t BW>
 __host__ __device__ constexpr uint64_t mask_for_bw()
@@ -358,11 +355,139 @@ template <uint8_t BW>
 }
 
 inline constexpr std::array<encode_dispatch_fn, 65> kEncodeDispatch = {{
-{{ENCODE_DISPATCH}}
+  &encode_dispatch_wrapper<0>,
+  &encode_dispatch_wrapper<1>,
+  &encode_dispatch_wrapper<2>,
+  &encode_dispatch_wrapper<3>,
+  &encode_dispatch_wrapper<4>,
+  &encode_dispatch_wrapper<5>,
+  &encode_dispatch_wrapper<6>,
+  &encode_dispatch_wrapper<7>,
+  &encode_dispatch_wrapper<8>,
+  &encode_dispatch_wrapper<9>,
+  &encode_dispatch_wrapper<10>,
+  &encode_dispatch_wrapper<11>,
+  &encode_dispatch_wrapper<12>,
+  &encode_dispatch_wrapper<13>,
+  &encode_dispatch_wrapper<14>,
+  &encode_dispatch_wrapper<15>,
+  &encode_dispatch_wrapper<16>,
+  &encode_dispatch_wrapper<17>,
+  &encode_dispatch_wrapper<18>,
+  &encode_dispatch_wrapper<19>,
+  &encode_dispatch_wrapper<20>,
+  &encode_dispatch_wrapper<21>,
+  &encode_dispatch_wrapper<22>,
+  &encode_dispatch_wrapper<23>,
+  &encode_dispatch_wrapper<24>,
+  &encode_dispatch_wrapper<25>,
+  &encode_dispatch_wrapper<26>,
+  &encode_dispatch_wrapper<27>,
+  &encode_dispatch_wrapper<28>,
+  &encode_dispatch_wrapper<29>,
+  &encode_dispatch_wrapper<30>,
+  &encode_dispatch_wrapper<31>,
+  &encode_dispatch_wrapper<32>,
+  &encode_dispatch_wrapper<33>,
+  &encode_dispatch_wrapper<34>,
+  &encode_dispatch_wrapper<35>,
+  &encode_dispatch_wrapper<36>,
+  &encode_dispatch_wrapper<37>,
+  &encode_dispatch_wrapper<38>,
+  &encode_dispatch_wrapper<39>,
+  &encode_dispatch_wrapper<40>,
+  &encode_dispatch_wrapper<41>,
+  &encode_dispatch_wrapper<42>,
+  &encode_dispatch_wrapper<43>,
+  &encode_dispatch_wrapper<44>,
+  &encode_dispatch_wrapper<45>,
+  &encode_dispatch_wrapper<46>,
+  &encode_dispatch_wrapper<47>,
+  &encode_dispatch_wrapper<48>,
+  &encode_dispatch_wrapper<49>,
+  &encode_dispatch_wrapper<50>,
+  &encode_dispatch_wrapper<51>,
+  &encode_dispatch_wrapper<52>,
+  &encode_dispatch_wrapper<53>,
+  &encode_dispatch_wrapper<54>,
+  &encode_dispatch_wrapper<55>,
+  &encode_dispatch_wrapper<56>,
+  &encode_dispatch_wrapper<57>,
+  &encode_dispatch_wrapper<58>,
+  &encode_dispatch_wrapper<59>,
+  &encode_dispatch_wrapper<60>,
+  &encode_dispatch_wrapper<61>,
+  &encode_dispatch_wrapper<62>,
+  &encode_dispatch_wrapper<63>,
+  &encode_dispatch_wrapper<64>,
 }};
 
 inline constexpr std::array<decode_dispatch_fn, 65> kDecodeDispatch = {{
-{{DECODE_DISPATCH}}
+  &decode_dispatch_wrapper<0>,
+  &decode_dispatch_wrapper<1>,
+  &decode_dispatch_wrapper<2>,
+  &decode_dispatch_wrapper<3>,
+  &decode_dispatch_wrapper<4>,
+  &decode_dispatch_wrapper<5>,
+  &decode_dispatch_wrapper<6>,
+  &decode_dispatch_wrapper<7>,
+  &decode_dispatch_wrapper<8>,
+  &decode_dispatch_wrapper<9>,
+  &decode_dispatch_wrapper<10>,
+  &decode_dispatch_wrapper<11>,
+  &decode_dispatch_wrapper<12>,
+  &decode_dispatch_wrapper<13>,
+  &decode_dispatch_wrapper<14>,
+  &decode_dispatch_wrapper<15>,
+  &decode_dispatch_wrapper<16>,
+  &decode_dispatch_wrapper<17>,
+  &decode_dispatch_wrapper<18>,
+  &decode_dispatch_wrapper<19>,
+  &decode_dispatch_wrapper<20>,
+  &decode_dispatch_wrapper<21>,
+  &decode_dispatch_wrapper<22>,
+  &decode_dispatch_wrapper<23>,
+  &decode_dispatch_wrapper<24>,
+  &decode_dispatch_wrapper<25>,
+  &decode_dispatch_wrapper<26>,
+  &decode_dispatch_wrapper<27>,
+  &decode_dispatch_wrapper<28>,
+  &decode_dispatch_wrapper<29>,
+  &decode_dispatch_wrapper<30>,
+  &decode_dispatch_wrapper<31>,
+  &decode_dispatch_wrapper<32>,
+  &decode_dispatch_wrapper<33>,
+  &decode_dispatch_wrapper<34>,
+  &decode_dispatch_wrapper<35>,
+  &decode_dispatch_wrapper<36>,
+  &decode_dispatch_wrapper<37>,
+  &decode_dispatch_wrapper<38>,
+  &decode_dispatch_wrapper<39>,
+  &decode_dispatch_wrapper<40>,
+  &decode_dispatch_wrapper<41>,
+  &decode_dispatch_wrapper<42>,
+  &decode_dispatch_wrapper<43>,
+  &decode_dispatch_wrapper<44>,
+  &decode_dispatch_wrapper<45>,
+  &decode_dispatch_wrapper<46>,
+  &decode_dispatch_wrapper<47>,
+  &decode_dispatch_wrapper<48>,
+  &decode_dispatch_wrapper<49>,
+  &decode_dispatch_wrapper<50>,
+  &decode_dispatch_wrapper<51>,
+  &decode_dispatch_wrapper<52>,
+  &decode_dispatch_wrapper<53>,
+  &decode_dispatch_wrapper<54>,
+  &decode_dispatch_wrapper<55>,
+  &decode_dispatch_wrapper<56>,
+  &decode_dispatch_wrapper<57>,
+  &decode_dispatch_wrapper<58>,
+  &decode_dispatch_wrapper<59>,
+  &decode_dispatch_wrapper<60>,
+  &decode_dispatch_wrapper<61>,
+  &decode_dispatch_wrapper<62>,
+  &decode_dispatch_wrapper<63>,
+  &decode_dispatch_wrapper<64>,
 }};
 
 [[nodiscard]] inline std::vector<uint64_t> encode_by_bw_gpu(uint8_t bw,
@@ -381,12 +506,6 @@ inline constexpr std::array<decode_dispatch_fn, 65> kDecodeDispatch = {{
 {
   if (bw > 64) { throw std::invalid_argument("decode_by_bw_gpu requires bw in [0,64]"); }
   return kDecodeDispatch[bw](packed, base_bits, total_count);
-}
-
-[[nodiscard]] inline bw_row row_for_bw(uint8_t bw)
-{
-  if (bw > 64) { throw std::invalid_argument("row_for_bw requires bw in [0,64]"); }
-  return kBwRows[bw];
 }
 
 }  // namespace native64_generated

@@ -12,7 +12,7 @@ Deliver a planning packet plus architecture and execution runbook for test-only 
 
 **Confirmed constraints**
 - Delivery scope: strategy packet + architecture + execution runbook.
-- Canonical strategy path: `docs/cudf/source/developer_guide/fastlanes_native64_r4_generation_strategy.md`.
+- Canonical strategy path: `cpp/examples/parquet_io/docs/fastlanes/fastlanes_native64_r4_generation_strategy.md`.
 - Ownership strictness: named primary + named backup required per artifact row.
 - Generation policy: Option A mandatory; Option B only with explicit blocker waiver.
 - Source of truth for generation: JSON bw spec + pinned templates + deterministic generator script.
@@ -27,10 +27,10 @@ Deliver a planning packet plus architecture and execution runbook for test-only 
 
 **Confirmed repo baseline**
 - Existing bw37 test suite: `cpp/tests/io/parquet_fastlanes_native64_bw37_test.cu`.
-- Existing bw37 CUDA helpers include: `cpp/tests/io/parquet_fastlanes_native64_bw37_cuda_kernels.inl`.
+- Existing bw37 CUDA helpers include: `cpp/include/cudf/fastlanes/parquet_fastlanes_native64_bw37_cuda_kernels.inl`.
 - Existing strategy packet exists in prompt area: `.github/prompts/fastlanes_native64_r4_generation_strategy.md`.
 - `PARQUET_FASTLANES_TEST` wiring exists in `cpp/tests/CMakeLists.txt` and includes bw37 test plus fastlanes pack/unpack sources.
-- `cpp/tests/io/fastlanes_native64_gen/` tree does not yet exist.
+- Legacy generation tree has been removed; retained runner now lives at `cpp/examples/parquet_io/tools/tests/run_parity_matrix.py`.
 
 ### Dependency Graph
 
@@ -53,7 +53,7 @@ Deliver a planning packet plus architecture and execution runbook for test-only 
 
 4. Editable scope (allowlist)
 - `docs/cudf/source/developer_guide/index.md` (planning references only)
-- `docs/cudf/source/developer_guide/fastlanes_native64_r4_generation_strategy.md` (if created in execution)
+- `cpp/examples/parquet_io/docs/fastlanes/fastlanes_native64_r4_generation_strategy.md` (if created in execution)
 - `.github/prompts/fastlanes_native64_r4_generation_strategy.md` (pointer/reference only)
 
 5. Forbidden scope (denylist)
@@ -95,9 +95,8 @@ Deliver a planning packet plus architecture and execution runbook for test-only 
 - Depends on M0.
 
 4. Editable scope (allowlist)
-- `cpp/tests/io/fastlanes_native64_gen/spec/native64_bw_table.json`
-- `cpp/tests/io/fastlanes_native64_gen/spec/README.md`
-- `docs/cudf/source/developer_guide/fastlanes_native64_r4_generation_strategy.md`
+- `cpp/examples/parquet_io/tools/tests/run_parity_matrix.py` (embedded matrix defaults)
+- `cpp/examples/parquet_io/docs/fastlanes/fastlanes_native64_r4_generation_strategy.md`
 
 5. Forbidden scope (denylist)
 - Production fastlanes/parquet source and headers.
@@ -136,10 +135,9 @@ Deliver a planning packet plus architecture and execution runbook for test-only 
 - Depends on M1.
 
 4. Editable scope (allowlist)
-- `cpp/tests/io/fastlanes_native64_gen/tools/` (generator scripts)
-- `cpp/tests/io/fastlanes_native64_gen/templates/` (pinned templates)
-- `cpp/tests/io/fastlanes_native64_gen/generated/native64_bw_kernels.inl`
-- `docs/cudf/source/developer_guide/fastlanes_native64_r4_generation_strategy.md`
+- `cpp/examples/parquet_io/tools/tests/run_parity_matrix.py`
+- `cpp/include/cudf/fastlanes/native64_bw_kernels.inl`
+- `cpp/examples/parquet_io/docs/fastlanes/fastlanes_native64_r4_generation_strategy.md`
 
 5. Forbidden scope (denylist)
 - Production encode/decode runtime code paths.
@@ -180,7 +178,7 @@ Deliver a planning packet plus architecture and execution runbook for test-only 
 4. Editable scope (allowlist)
 - `cpp/tests/io/parquet_fastlanes_native64_generated_test.cu`
 - `cpp/tests/CMakeLists.txt` (only additive test-only wiring if needed and explicitly approved)
-- `docs/cudf/source/developer_guide/fastlanes_native64_r4_generation_strategy.md`
+- `cpp/examples/parquet_io/docs/fastlanes/fastlanes_native64_r4_generation_strategy.md`
 
 5. Forbidden scope (denylist)
 - Existing production source/headers.
@@ -221,8 +219,8 @@ Deliver a planning packet plus architecture and execution runbook for test-only 
 - Depends on M3.
 
 4. Editable scope (allowlist)
-- `cpp/tests/io/fastlanes_native64_gen/config/parity_matrix.yaml` (or equivalent config file)
-- `docs/cudf/source/developer_guide/fastlanes_native64_r4_generation_strategy.md`
+- `cpp/examples/parquet_io/tools/tests/run_parity_matrix.py` (embedded defaults, optional `--config` override)
+- `cpp/examples/parquet_io/docs/fastlanes/fastlanes_native64_r4_generation_strategy.md`
 
 5. Forbidden scope (denylist)
 - Production runtime paths.
@@ -260,9 +258,9 @@ Deliver a planning packet plus architecture and execution runbook for test-only 
 - Depends on M4.
 
 4. Editable scope (allowlist)
-- `cpp/tests/io/fastlanes_native64_gen/tools/run_parity_matrix.py`
-- `cpp/tests/io/fastlanes_native64_gen/schema/r4_matrix_summary.schema.json`
-- `docs/cudf/source/developer_guide/fastlanes_native64_r4_generation_strategy.md`
+- `cpp/examples/parquet_io/tools/tests/run_parity_matrix.py`
+- `parquet_io_shared/reports/cudf-fastlane/<run_tag>/r4_matrix_summary.json`
+- `cpp/examples/parquet_io/docs/fastlanes/fastlanes_native64_r4_generation_strategy.md`
 
 5. Forbidden scope (denylist)
 - Production code paths.
@@ -301,7 +299,7 @@ Deliver a planning packet plus architecture and execution runbook for test-only 
 - Depends on M5.
 
 4. Editable scope (allowlist)
-- `docs/cudf/source/developer_guide/fastlanes_native64_r4_generation_strategy.md`
+- `cpp/examples/parquet_io/docs/fastlanes/fastlanes_native64_r4_generation_strategy.md`
 - `.github/prompts/fastlanes_native64_r4_generation_strategy.md` (pointer update only)
 
 5. Forbidden scope (denylist)
@@ -342,7 +340,7 @@ Deliver a planning packet plus architecture and execution runbook for test-only 
 - Depends on M6.
 
 4. Editable scope (allowlist)
-- `docs/cudf/source/developer_guide/fastlanes_native64_r4_generation_strategy.md`
+- `cpp/examples/parquet_io/docs/fastlanes/fastlanes_native64_r4_generation_strategy.md`
 - `docs/cudf/source/developer_guide/index.md`
 - `.github/prompts/fastlanes_native64_r4_generation_strategy.md` (pointer to canonical doc)
 
@@ -376,15 +374,15 @@ Deliver a planning packet plus architecture and execution runbook for test-only 
 ### Relevant Files
 
 - `cpp/tests/io/parquet_fastlanes_native64_bw37_test.cu` — existing bw37 parity baseline and guard reference.
-- `cpp/tests/io/parquet_fastlanes_native64_bw37_cuda_kernels.inl` — existing test-only CUDA helper pattern.
+- `cpp/include/cudf/fastlanes/parquet_fastlanes_native64_bw37_cuda_kernels.inl` — existing test-only CUDA helper pattern.
 - `cpp/tests/CMakeLists.txt` — current `PARQUET_FASTLANES_TEST` wiring and composition guard.
 - `.github/prompts/fastlanes_native64_r4_generation_strategy.md` — current strategy source to keep as pointer/reference.
 - `docs/cudf/source/developer_guide/index.md` — canonical strategy doc discoverability in toctree.
-- `docs/cudf/source/developer_guide/fastlanes_native64_r4_generation_strategy.md` — canonical R4 strategy destination.
-- `cpp/tests/io/fastlanes_native64_gen/spec/native64_bw_table.json` — planned bw0..64 spec table source.
-- `cpp/tests/io/fastlanes_native64_gen/generated/native64_bw_kernels.inl` — planned generated kernel include output.
+- `cpp/examples/parquet_io/docs/fastlanes/fastlanes_native64_r4_generation_strategy.md` — canonical R4 strategy destination.
+- `cpp/examples/parquet_io/tools/tests/run_parity_matrix.py` — embedded bw0..64 matrix contract source.
+- `cpp/include/cudf/fastlanes/native64_bw_kernels.inl` — finalized generated kernel include output.
 - `cpp/tests/io/parquet_fastlanes_native64_generated_test.cu` — planned generated parity harness glue.
-- `cpp/tests/io/fastlanes_native64_gen/tools/run_parity_matrix.py` — planned parity matrix executor.
+- `cpp/examples/parquet_io/tools/tests/run_parity_matrix.py` — planned parity matrix executor.
 
 ### Verification (Plan-level)
 
