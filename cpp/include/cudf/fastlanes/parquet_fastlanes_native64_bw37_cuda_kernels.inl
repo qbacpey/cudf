@@ -55,15 +55,23 @@ __device__ __forceinline__ void decode_lane_native64_bw37(uint64_t const* __rest
   }
 }
 
+static_assert(kLanesPerVector == 16,
+              "bw37 helper kernels require a 16-lane striped bitstream contract");
+constexpr uint32_t kThreadsPerBlockBw37 = 32;
+static_assert(kThreadsPerBlockBw37 >= 16, "kThreadsPerBlockBw37 must be at least 16");
+static_assert((kThreadsPerBlockBw37 % 16) == 0,
+              "kThreadsPerBlockBw37 must be a multiple of 16");
+constexpr uint32_t kVectorsPerBlockBw37 = kThreadsPerBlockBw37 / 16;
+
 __global__ void encode_native64_bw37_test_kernel(uint64_t const* __restrict values,
                                                  uint64_t* __restrict packed,
                                                  uint64_t base_bits,
                                                  uint32_t padded_count)
 {
-  auto const lane      = static_cast<uint32_t>(threadIdx.x);
-  auto const vector_id = static_cast<uint32_t>(blockIdx.x);
-
-  if (lane >= kLanesPerVector) { return; }
+  auto const tid       = static_cast<uint32_t>(threadIdx.x);
+  auto const subvec    = tid / kLanesPerVector;
+  auto const lane      = tid % kLanesPerVector;
+  auto const vector_id = static_cast<uint32_t>(blockIdx.x) * kVectorsPerBlockBw37 + subvec;
 
   auto const vector_start = vector_id * kVectorSize;
   if (vector_start >= padded_count) { return; }
@@ -79,10 +87,10 @@ __global__ void decode_native64_bw37_test_kernel(uint64_t const* __restrict pack
                                                  uint64_t base_bits,
                                                  uint32_t padded_count)
 {
-  auto const lane      = static_cast<uint32_t>(threadIdx.x);
-  auto const vector_id = static_cast<uint32_t>(blockIdx.x);
-
-  if (lane >= kLanesPerVector) { return; }
+  auto const tid       = static_cast<uint32_t>(threadIdx.x);
+  auto const subvec    = tid / kLanesPerVector;
+  auto const lane      = tid % kLanesPerVector;
+  auto const vector_id = static_cast<uint32_t>(blockIdx.x) * kVectorsPerBlockBw37 + subvec;
 
   auto const vector_start = vector_id * kVectorSize;
   if (vector_start >= padded_count) { return; }
@@ -100,6 +108,8 @@ __global__ void decode_native64_bw37_test_kernel(uint64_t const* __restrict pack
   auto const stream      = cudf::get_default_stream();
   auto const padded_count = static_cast<uint32_t>(fastlanes::padded_count(total_count));
   auto const num_vectors  = static_cast<uint32_t>(fastlanes::num_vectors(total_count));
+  auto const num_blocks =
+    (num_vectors + kVectorsPerBlockBw37 - 1U) / kVectorsPerBlockBw37;
 
   if (values.size() != padded_count) {
     throw std::invalid_argument("encode_bw37_on_gpu values size mismatch");
@@ -144,7 +154,7 @@ __global__ void decode_native64_bw37_test_kernel(uint64_t const* __restrict pack
     throw std::runtime_error(err_msg);
   }
 
-  encode_native64_bw37_test_kernel<<<num_vectors, kLanesPerVector, 0, stream.value()>>>(
+  encode_native64_bw37_test_kernel<<<num_blocks, kThreadsPerBlockBw37, 0, stream.value()>>>(
     d_values, d_packed, base_bits, padded_count);
 
   auto const launch_status = cudaGetLastError();
@@ -187,6 +197,8 @@ __global__ void decode_native64_bw37_test_kernel(uint64_t const* __restrict pack
   auto const stream      = cudf::get_default_stream();
   auto const padded_count = static_cast<size_t>(fastlanes::padded_count(total_count));
   auto const num_vectors  = static_cast<uint32_t>(fastlanes::num_vectors(total_count));
+  auto const num_blocks =
+    (num_vectors + kVectorsPerBlockBw37 - 1U) / kVectorsPerBlockBw37;
 
   if (packed.size() != static_cast<size_t>(num_vectors) * kWordsPerVector37) {
     throw std::invalid_argument("decode_bw37_on_gpu packed size mismatch");
@@ -231,7 +243,7 @@ __global__ void decode_native64_bw37_test_kernel(uint64_t const* __restrict pack
     throw std::runtime_error(err_msg);
   }
 
-  decode_native64_bw37_test_kernel<<<num_vectors, kLanesPerVector, 0, stream.value()>>>(
+  decode_native64_bw37_test_kernel<<<num_blocks, kThreadsPerBlockBw37, 0, stream.value()>>>(
     d_packed, d_decoded, base_bits, static_cast<uint32_t>(padded_count));
 
   auto const launch_status = cudaGetLastError();
