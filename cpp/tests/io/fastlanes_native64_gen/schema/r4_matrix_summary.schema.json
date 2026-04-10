@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rapids.ai/cudf/fastlanes/r4_matrix_summary.schema.json",
+  "title": "FL64-R4 Matrix Summary",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_tag",
+    "report_path",
+    "path_policy_ok",
+    "generated_at_utc",
+    "host",
+    "gtest_binary",
+    "phase",
+    "commands",
+    "results",
+    "summary",
+    "matrix_contract"
+  ],
+  "properties": {
+    "schema_version": { "type": "string" },
+    "run_tag": { "type": "string" },
+    "report_path": { "type": "string" },
+    "path_policy_ok": { "type": "boolean" },
+    "generated_at_utc": { "type": "string" },
+    "host": { "type": "string" },
+    "user": { "type": "string" },
+    "gtest_binary": { "type": "string" },
+    "phase": { "type": "string", "enum": ["anchor", "full", "all"] },
+    "commands": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "filter", "command", "return_code", "duration_seconds", "passed"],
+        "properties": {
+          "name": { "type": "string" },
+          "filter": { "type": "string" },
+          "command": { "type": "string" },
+          "return_code": { "type": "integer" },
+          "duration_seconds": { "type": "number" },
+          "passed": { "type": "boolean" },
+          "passed_tests_reported": { "type": ["integer", "null"] },
+          "failed_tests_reported": { "type": ["integer", "null"] }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total_commands", "passed_commands", "failed_commands", "all_passed"],
+      "properties": {
+        "total_commands": { "type": "integer" },
+        "passed_commands": { "type": "integer" },
+        "failed_commands": { "type": "integer" },
+        "all_passed": { "type": "boolean" }
+      }
+    },
+    "matrix_contract": {
+      "type": "object",
+      "required": ["anchors", "full_sweep", "stability_repeats"],
+      "properties": {
+        "anchors": {
+          "type": "array",
+          "items": { "type": "integer" }
+        },
+        "full_sweep": {
+          "type": "object",
+          "required": ["min", "max"],
+          "properties": {
+            "min": { "type": "integer" },
+            "max": { "type": "integer" }
+          }
+        },
+        "stability_repeats": { "type": "integer" }
+      }
+    }
+  }
+}

@@ -218,53 +218,119 @@ START NOW
 
 MY OBJECTIVE BEGIN
 
-Now I want to implement the GPU version for Fastlane64 decoding. So I want you to research about wheather I could implemnt the GPU version of fastlane decoding base on the current CPU fastlane INT64 decoding and encoding code. I think the first setp is to verify wheather this plan is applicable. Then try to implement a decoding kernel for just one bitwidth. Then test this bitwidth GPU decoder. If success, try to write a script that can genreate the code for other bitwidth or just let the LLM to generate other bitwidth code。. And verify the code implemnntation of all the encoding and decoding, should compare the GPU decoder and the CPU decoder. Then tried to really integrated the GPU decoder into cudf. Since current data gather and the encoder are all in a coarse of INT32, so I need to rewrite the gather and rewrite the encoder logic. Thnen may be also need to update the related header. Do you think this is applicaable? Or what should I do so that this can be verifyed as applicable so that I can directly give the prompt to a plan agent to implemtn all these for me?
+# FL64-R4: bw0..64 Generation Strategy Packet
 
-**Applicability Verdict**
-Yes, your plan is applicable, but not as a direct port of current CPU int64 code into the existing GPU decode path.
+## Goal
+Produce an implementable and low-risk strategy to scale the FL64 prototype logic from bw37 to bw0..64 with explicit ownership, parity coverage, and rollback controls.
 
-The key evidence:
-- CPU has full uint64 bitwidth support up to 64 in generated code: pack.cpp, pack.cpp, unffor.cpp, unffor.cpp.
-- GPU unpack is currently 32-bit oriented and only dispatched for bw 0..32: unpack.cuh, unpack.cuh, unpack.cuh.
-- Header/metadata validation is still bounded to 1..32 and split64 boolean mode semantics: common.cuh, common.cuh, common.cuh.
-- INT64 GPU decode is hard-wired to split low/high streams today: page_fastlanes_decode.cu, page_fastlanes_decode.cu, page_fastlanes_decode.cu, page_fastlanes_decode.cu.
+## Dependency
+- Required predecessor: FL64-R3 (bw37 GPU parity and stability complete).
 
-**What Is Already True (important correction)**
-You do not need to newly invent int64 gather plumbing first. It already exists in the host CPU-encode block:
-- uint64 gather: page_enc.cu
-- int64 encoder invocation: page_enc.cu
+## Scope Guardrails
+- Allowed scope:
+  - Planning and design documents.
+  - Test-only generation utility and test-only helper artifacts.
+- Forbidden scope:
+  - Production reader, writer, header/runtime paths.
 
-But that encoder currently uses split32 for int64 (with TODO for native64):
-- fastlanes_encode.cuh
-- fastlanes_encode.cuh
+## Ownership and Artifact Matrix
+| Artifact | Type | Owner | Backup Reviewer | Source of Truth | Output Path | Gate |
+|---|---|---|---|---|---|---|
+| Native64 bw spec table (bw, words_per_lane, cross-boundary map) | Generated metadata (test-only) | FastLanes test owner | IO parquet owner | Script input spec | cpp/tests/io/fastlanes_native64_gen/spec/native64_bw_table.json | FL64-R4-M1 |
+| CUDA kernel include (bw0..64, test-only) | Generated code | FastLanes test owner | CUDA reviewer | Generator + golden snapshots | cpp/tests/io/fastlanes_native64_gen/generated/native64_bw_kernels.inl | FL64-R4-M2 |
+| CPU oracle compare harness glue | Handwritten test glue | FastLanes test owner | QA owner | Test source | cpp/tests/io/parquet_fastlanes_native64_generated_test.cu | FL64-R4-M2 |
+| Parity matrix executor (anchor + full sweep) | Test utility | QA owner | FastLanes test owner | Matrix config | cpp/tests/io/fastlanes_native64_gen/tools/run_parity_matrix.py | FL64-R4-M3 |
+| Run evidence summary | Report | QA owner | IO parquet owner | CI/remote logs | parquet_io_shared/reports/cudf-fastlane/<run_tag>/r4_matrix_summary.json | FL64-R4-M3 |
+| Unresolved issues log | Design note | IO parquet owner | FastLanes test owner | This packet + run feedback | docs/cudf/source/developer_guide/fastlanes_native64_r4_generation_strategy.md | FL64-R4-M4 |
 
-**Best One-Bitwidth Prototype**
-Use bw 37 as the first GPU native64 prototype (better than 64 for logic coverage, because it stresses cross-word unpacking and >32 behavior).
+## Generation Approach Options
 
-Prototype gate:
-1. Build a decode-only native64 micro-kernel path for bw 37 (no full writer integration yet).
-2. Generate packed input with CPU pack reference for bw 37.
-3. Decode on GPU native64 path.
-4. Decode on CPU reference path.
-5. Require exact bitwise equality for int64 and uint64 interpretations.
+### Option A: Scripted Generation (preferred)
+- Method:
+  - Use one canonical bw table (0..64) and generate CUDA test kernels and dispatch stubs.
+  - Emit deterministic files from pinned templates.
+- Pros:
+  - Low drift risk across 65 bitwidths.
+  - Repeatable regeneration and easier review diffs.
+  - Better ownership clarity via explicit generator inputs.
+- Risks:
+  - Generator bugs can propagate broadly.
+- Controls:
+  - Golden snapshots for anchor bitwidths.
+  - Generator unit checks for word count and boundary crossings.
+  - CI block if generated output differs from committed output.
 
-**Scale-Up Strategy**
-After bw 37 passes:
-1. Generate GPU unpack64 for bw 0..64.
-2. Run parameterized CPU-vs-GPU decode tests at least on 0, 1, 31, 32, 33, 37, 63, 64, then full sweep 0..64.
-3. Keep split64 path untouched as fallback until native64 is fully proven.
+### Option B: Assisted Manual Generation (fallback)
+- Method:
+  - Generate anchor bitwidths automatically and hand-write remaining bw code in small batches.
+- Pros:
+  - Easier debugging for a few edge bitwidths.
+- Risks:
+  - High maintenance cost and drift risk.
+  - Inconsistent ownership and style.
+- Controls:
+  - Mandatory two-reviewer signoff per batch.
+  - Strict parity gate after each batch.
 
-**cuDF Integration Deltas You Will Need**
-- Add a distinct native64 encoding in API/schema enums, since current exposed encodings only include RAW and SPLIT64: types.hpp, parquet_schema.hpp.
-- Extend writer request validation and runtime selection (currently only RAW or SPLIT64): writer_impl.cu, page_enc.cu, page_enc.cu.
-- Update reservation math, which is currently hard-capped at bitwidth 32 assumptions: page_enc.cu.
-- Extend decode routing to recognize native64 encoding (currently RAW/SPLIT64 only): page_hdr.cu, parquet_gpu.hpp.
+### Decision Rule
+- Use Option A unless a blocker is proven that prevents deterministic generation.
+- If Option B is used for any bw, record justification and owner in Unresolved Issues.
 
-**Proof Criteria To Give a Planning Agent**
-1. Primitive correctness: bw 37 native64 GPU decoder matches CPU reference on randomized and adversarial datasets.
-2. Generated coverage: bw 0..64 passes CPU-vs-GPU decode parity.
-3. Parquet decode integration: native64 pages decode correctly for INT64 and UINT64.
-4. Parquet writer integration: forced native64 encoding writes readable files, with expected page encoding metadata.
-5. Regression safety: existing RAW and SPLIT64 tests still pass, especially current split64 suites like parquet_fastlanes_test.cpp and parquet_fastlanes_test.cpp.
+## Mandatory Parity Matrix
+
+### Phase 1: Anchor Matrix (must pass first)
+- Bitwidths: 0, 1, 31, 32, 33, 37, 63, 64.
+- For each anchor bw:
+  - CPU pack -> GPU decode parity.
+  - GPU encode -> CPU unpack parity.
+  - GPU encode -> GPU decode roundtrip parity.
+  - Signed INT64 bit-cast parity checks.
+
+### Phase 2: Full Sweep Matrix (0..64)
+- Sweep all bitwidths 0 through 64.
+- Per bw scenarios:
+  - randomized, adversarial, pathological patterns.
+  - bases: 0, near INT64 min, near INT64 max, and high unsigned base.
+  - counts: 1023, 1024, 1025, 2047, 2048, 2049.
+- Minimum pass criteria:
+  - zero parity mismatches for all matrix cells.
+  - stable checksums across repeated runs (>= 3 repeats for selected seeds).
+
+## Graduation Criteria: Test-Only -> Production Candidate
+All conditions must be true before any production-path proposal:
+1. Anchor matrix passed for all required checks.
+2. Full sweep 0..64 passed with zero mismatches.
+3. Ownership matrix has no ambiguous owner fields.
+4. Generated artifacts are reproducible from committed generator inputs.
+5. Existing split32/raw non-regression tests pass unchanged.
+6. Header contract proposal for native64 has explicit review approval.
+
+## Validation Approach
+Validate strategy completeness with a dependency and ownership checklist:
+1. Confirm FL64-R3 evidence exists and links to bw37 parity reports.
+2. Confirm each generated artifact row has one primary owner and one reviewer.
+3. Confirm anchor matrix is explicitly listed and includes 0,1,31,32,33,37,63,64.
+4. Confirm full sweep 0..64 is explicitly required.
+5. Confirm graduation criteria and rollback trigger are testable and binary.
+6. Confirm no production path files are modified by R4 activities.
+
+## Acceptance Criteria
+- Strategy packet exists and is executable as written.
+- Matrix and ownership are explicit per artifact.
+- Unresolved issues section is present and non-empty if any open items remain.
+
+## Rollback Trigger
+Rollback R4 outputs if either condition occurs:
+- Ownership is ambiguous for any generated artifact.
+- Parity coverage is missing any required anchor bitwidth or any bw in 0..64 sweep.
+
+## Evidence to Collect
+- Strategy document (this file).
+- Matrix execution summary report per run tag.
+- Unresolved issue list updates.
+
+## Unresolved Issues
+- Native64 parquet header contract detail (encoding metadata representation) remains pending and is intentionally deferred to post-R4 production design review.
+
 
 MY OBJECTIVE END
