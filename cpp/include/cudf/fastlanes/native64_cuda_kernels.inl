@@ -118,10 +118,10 @@ __device__ __forceinline__ void decode_lane_native64(uint64_t const* __restrict 
 }
 
 template <uint8_t BW>
-__global__ void encode_native64_test_kernel(uint64_t const* __restrict values,
-                                            uint64_t* __restrict packed,
-                                            uint64_t base_bits,
-                                            uint32_t padded_count)
+__global__ void encode_native64_kernel(uint64_t const* __restrict values,
+                                       uint64_t* __restrict packed,
+                                       uint64_t base_bits,
+                                       uint32_t padded_count)
 {
   auto const tid       = static_cast<uint32_t>(threadIdx.x);
   auto const subvec    = tid / kLanesPerVector;
@@ -137,10 +137,10 @@ __global__ void encode_native64_test_kernel(uint64_t const* __restrict values,
 }
 
 template <uint8_t BW>
-__global__ void decode_native64_test_kernel(uint64_t const* __restrict packed,
-                                            uint64_t* __restrict decoded,
-                                            uint64_t base_bits,
-                                            uint32_t padded_count)
+__global__ void decode_native64_kernel(uint64_t const* __restrict packed,
+                                       uint64_t* __restrict decoded,
+                                       uint64_t base_bits,
+                                       uint32_t padded_count)
 {
   auto const tid       = static_cast<uint32_t>(threadIdx.x);
   auto const subvec    = tid / kLanesPerVector;
@@ -155,368 +155,220 @@ __global__ void decode_native64_test_kernel(uint64_t const* __restrict packed,
   decode_lane_native64<BW>(vector_in, vector_out, lane, base_bits);
 }
 
-template <uint8_t BW>
-[[nodiscard]] std::vector<uint64_t> encode_on_gpu(std::vector<uint64_t> const& values,
-                                                  uint64_t base_bits,
-                                                  uint32_t total_count)
+// Host-launch entrypoints. `values`, `packed`, and `decoded` must all point to CUDA device memory.
+// These are not intended for direct device-side launch. For runtime BW dispatch from inside a CUDA
+// kernel, use `encode_lane_by_bw_device_runtime` / `decode_lane_by_bw_device_runtime` below.
+
+#define NATIVE64_FOR_EACH_BW(M) \
+  M(0)                          \
+  M(1)                          \
+  M(2)                          \
+  M(3)                          \
+  M(4)                          \
+  M(5)                          \
+  M(6)                          \
+  M(7)                          \
+  M(8)                          \
+  M(9)                          \
+  M(10)                         \
+  M(11)                         \
+  M(12)                         \
+  M(13)                         \
+  M(14)                         \
+  M(15)                         \
+  M(16)                         \
+  M(17)                         \
+  M(18)                         \
+  M(19)                         \
+  M(20)                         \
+  M(21)                         \
+  M(22)                         \
+  M(23)                         \
+  M(24)                         \
+  M(25)                         \
+  M(26)                         \
+  M(27)                         \
+  M(28)                         \
+  M(29)                         \
+  M(30)                         \
+  M(31)                         \
+  M(32)                         \
+  M(33)                         \
+  M(34)                         \
+  M(35)                         \
+  M(36)                         \
+  M(37)                         \
+  M(38)                         \
+  M(39)                         \
+  M(40)                         \
+  M(41)                         \
+  M(42)                         \
+  M(43)                         \
+  M(44)                         \
+  M(45)                         \
+  M(46)                         \
+  M(47)                         \
+  M(48)                         \
+  M(49)                         \
+  M(50)                         \
+  M(51)                         \
+  M(52)                         \
+  M(53)                         \
+  M(54)                         \
+  M(55)                         \
+  M(56)                         \
+  M(57)                         \
+  M(58)                         \
+  M(59)                         \
+  M(60)                         \
+  M(61)                         \
+  M(62)                         \
+  M(63)                         \
+  M(64)
+
+// Device-side runtime BW dispatcher for kernels that compute BW on GPU.
+// `vector_in`/`vector_out` are one-vector striped pointers and `lane` is thread lane [0, 15].
+__device__ __forceinline__ void encode_lane_by_bw_device_runtime(uint8_t bw,
+                                                                  uint64_t const* vector_in,
+                                                                  uint64_t* vector_out,
+                                                                  uint32_t lane,
+                                                                  uint64_t base_bits)
 {
-  auto const stream       = cudf::get_default_stream();
+  switch (bw) {
+#define ENCODE_LANE_CASE(BW) \
+  case BW: encode_lane_native64<BW>(vector_in, vector_out, lane, base_bits); return;
+    NATIVE64_FOR_EACH_BW(ENCODE_LANE_CASE)
+#undef ENCODE_LANE_CASE
+    default: return;
+  }
+}
+
+// Device-side runtime BW dispatcher for decode inside CUDA kernels.
+__device__ __forceinline__ void decode_lane_by_bw_device_runtime(uint8_t bw,
+                                                                  uint64_t const* vector_in,
+                                                                  uint64_t* vector_out,
+                                                                  uint32_t lane,
+                                                                  uint64_t base_bits)
+{
+  switch (bw) {
+#define DECODE_LANE_CASE(BW) \
+  case BW: decode_lane_native64<BW>(vector_in, vector_out, lane, base_bits); return;
+    NATIVE64_FOR_EACH_BW(DECODE_LANE_CASE)
+#undef DECODE_LANE_CASE
+    default: return;
+  }
+}
+
+using encode_device_ptr_dispatch_fn =
+  void (*)(uint64_t const*, uint64_t*, uint64_t, uint32_t, cudaStream_t);
+using decode_device_ptr_dispatch_fn =
+  void (*)(uint64_t const*, uint64_t*, uint64_t, uint32_t, cudaStream_t);
+
+template <uint8_t BW>
+void encode_device_ptr_dispatch_wrapper(uint64_t const* values,
+                                        uint64_t* packed,
+                                        uint64_t base_bits,
+                                        uint32_t total_count,
+                                        cudaStream_t stream)
+{
   auto const padded_count = static_cast<uint32_t>(fastlanes::padded_count(total_count));
   auto const num_vectors  = static_cast<uint32_t>(fastlanes::num_vectors(total_count));
-  auto const num_blocks   = (num_vectors + kVectorsPerBlock - 1U) / kVectorsPerBlock;
-
-  if (values.size() != padded_count) {
-    throw std::invalid_argument("encode_on_gpu values size mismatch");
-  }
-
-  constexpr auto kWordsPerVector = words_per_vector_for_bw<BW>();
-  std::vector<uint64_t> packed(static_cast<size_t>(num_vectors) * kWordsPerVector, 0ULL);
+  if (num_vectors == 0) { return; }
 
   if constexpr (BW == 0) {
-    return packed;
+    return;
+  } else {
+    auto const num_blocks = (num_vectors + kVectorsPerBlock - 1U) / kVectorsPerBlock;
+    encode_native64_kernel<BW><<<num_blocks, kThreadsPerBlock, 0, stream>>>(
+      values, packed, base_bits, padded_count);
+
+    auto const launch_status = cudaGetLastError();
+    if (launch_status != cudaSuccess) {
+      throw std::runtime_error(cuda_error(launch_status, "native64 encode kernel launch"));
+    }
   }
-
-  uint64_t* d_values = nullptr;
-  uint64_t* d_packed = nullptr;
-
-  auto const values_bytes = values.size() * sizeof(uint64_t);
-  auto const packed_bytes = packed.size() * sizeof(uint64_t);
-
-  auto const malloc_values_status = cudaMalloc(reinterpret_cast<void**>(&d_values), values_bytes);
-  if (malloc_values_status != cudaSuccess) {
-    throw std::runtime_error(cuda_error(malloc_values_status, "cudaMalloc(d_values)"));
-  }
-
-  auto const malloc_packed_status = cudaMalloc(reinterpret_cast<void**>(&d_packed), packed_bytes);
-  if (malloc_packed_status != cudaSuccess) {
-    cudaFree(d_values);
-    throw std::runtime_error(cuda_error(malloc_packed_status, "cudaMalloc(d_packed)"));
-  }
-
-  auto cleanup = [&]() {
-    cudaFree(d_values);
-    cudaFree(d_packed);
-  };
-
-  auto const h2d_status = cudaMemcpyAsync(
-    d_values, values.data(), values_bytes, cudaMemcpyHostToDevice, stream.value());
-  if (h2d_status != cudaSuccess) {
-    auto err_msg = cuda_error(h2d_status, "cudaMemcpy H2D values");
-    cleanup();
-    throw std::runtime_error(err_msg);
-  }
-
-  auto const memset_status = cudaMemsetAsync(d_packed, 0, packed_bytes, stream.value());
-  if (memset_status != cudaSuccess) {
-    auto err_msg = cuda_error(memset_status, "cudaMemset packed");
-    cleanup();
-    throw std::runtime_error(err_msg);
-  }
-
-  encode_native64_test_kernel<BW><<<num_blocks, kThreadsPerBlock, 0, stream.value()>>>(
-    d_values, d_packed, base_bits, padded_count);
-
-  auto const launch_status = cudaGetLastError();
-  if (launch_status != cudaSuccess) {
-    auto err_msg = cuda_error(launch_status, "native64 encode kernel launch");
-    cleanup();
-    throw std::runtime_error(err_msg);
-  }
-
-  auto const sync_status = cudaStreamSynchronize(stream.value());
-  if (sync_status != cudaSuccess) {
-    auto err_msg = cuda_error(sync_status, "cudaStreamSynchronize");
-    cleanup();
-    throw std::runtime_error(err_msg);
-  }
-
-  auto const d2h_status = cudaMemcpyAsync(
-    packed.data(), d_packed, packed_bytes, cudaMemcpyDeviceToHost, stream.value());
-  if (d2h_status != cudaSuccess) {
-    auto err_msg = cuda_error(d2h_status, "cudaMemcpy D2H packed");
-    cleanup();
-    throw std::runtime_error(err_msg);
-  }
-
-  auto const d2h_sync_status = cudaStreamSynchronize(stream.value());
-  if (d2h_sync_status != cudaSuccess) {
-    auto err_msg = cuda_error(d2h_sync_status, "cudaStreamSynchronize");
-    cleanup();
-    throw std::runtime_error(err_msg);
-  }
-
-  cleanup();
-  return packed;
 }
 
 template <uint8_t BW>
-[[nodiscard]] std::vector<uint64_t> decode_on_gpu(std::vector<uint64_t> const& packed,
-                                                  uint64_t base_bits,
-                                                  uint32_t total_count)
+void decode_device_ptr_dispatch_wrapper(uint64_t const* packed,
+                                        uint64_t* decoded,
+                                        uint64_t base_bits,
+                                        uint32_t total_count,
+                                        cudaStream_t stream)
 {
-  auto const stream       = cudf::get_default_stream();
-  auto const padded_count = static_cast<size_t>(fastlanes::padded_count(total_count));
+  auto const padded_count = static_cast<uint32_t>(fastlanes::padded_count(total_count));
   auto const num_vectors  = static_cast<uint32_t>(fastlanes::num_vectors(total_count));
-  auto const num_blocks   = (num_vectors + kVectorsPerBlock - 1U) / kVectorsPerBlock;
+  if (num_vectors == 0) { return; }
 
-  constexpr auto kWordsPerVector = words_per_vector_for_bw<BW>();
-  if (packed.size() != static_cast<size_t>(num_vectors) * kWordsPerVector) {
-    throw std::invalid_argument("decode_on_gpu packed size mismatch");
-  }
-
-  std::vector<uint64_t> out_host(padded_count, 0ULL);
-
-  if constexpr (BW == 0) {
-    std::fill(out_host.begin(), out_host.end(), base_bits);
-    return out_host;
-  }
-
-  uint64_t* d_packed  = nullptr;
-  uint64_t* d_decoded = nullptr;
-
-  auto const packed_bytes  = packed.size() * sizeof(uint64_t);
-  auto const decoded_bytes = out_host.size() * sizeof(uint64_t);
-
-  auto const malloc_packed_status = cudaMalloc(reinterpret_cast<void**>(&d_packed), packed_bytes);
-  if (malloc_packed_status != cudaSuccess) {
-    throw std::runtime_error(cuda_error(malloc_packed_status, "cudaMalloc(d_packed)"));
-  }
-
-  auto const malloc_out_status = cudaMalloc(reinterpret_cast<void**>(&d_decoded), decoded_bytes);
-  if (malloc_out_status != cudaSuccess) {
-    cudaFree(d_packed);
-    throw std::runtime_error(cuda_error(malloc_out_status, "cudaMalloc(d_decoded)"));
-  }
-
-  auto cleanup = [&]() {
-    cudaFree(d_packed);
-    cudaFree(d_decoded);
-  };
-
-  auto const h2d_status = cudaMemcpyAsync(
-    d_packed, packed.data(), packed_bytes, cudaMemcpyHostToDevice, stream.value());
-  if (h2d_status != cudaSuccess) {
-    auto err_msg = cuda_error(h2d_status, "cudaMemcpy H2D packed");
-    cleanup();
-    throw std::runtime_error(err_msg);
-  }
-
-  auto const memset_status = cudaMemsetAsync(d_decoded, 0, decoded_bytes, stream.value());
-  if (memset_status != cudaSuccess) {
-    auto err_msg = cuda_error(memset_status, "cudaMemset decoded");
-    cleanup();
-    throw std::runtime_error(err_msg);
-  }
-
-  decode_native64_test_kernel<BW><<<num_blocks, kThreadsPerBlock, 0, stream.value()>>>(
-    d_packed, d_decoded, base_bits, static_cast<uint32_t>(padded_count));
+  auto const num_blocks = (num_vectors + kVectorsPerBlock - 1U) / kVectorsPerBlock;
+  decode_native64_kernel<BW><<<num_blocks, kThreadsPerBlock, 0, stream>>>(
+    packed, decoded, base_bits, padded_count);
 
   auto const launch_status = cudaGetLastError();
   if (launch_status != cudaSuccess) {
-    auto err_msg = cuda_error(launch_status, "native64 decode kernel launch");
-    cleanup();
-    throw std::runtime_error(err_msg);
+    throw std::runtime_error(cuda_error(launch_status, "native64 decode kernel launch"));
   }
-
-  auto const sync_status = cudaStreamSynchronize(stream.value());
-  if (sync_status != cudaSuccess) {
-    auto err_msg = cuda_error(sync_status, "cudaStreamSynchronize");
-    cleanup();
-    throw std::runtime_error(err_msg);
-  }
-
-  auto const d2h_status = cudaMemcpyAsync(
-    out_host.data(), d_decoded, decoded_bytes, cudaMemcpyDeviceToHost, stream.value());
-  if (d2h_status != cudaSuccess) {
-    auto err_msg = cuda_error(d2h_status, "cudaMemcpy D2H decoded");
-    cleanup();
-    throw std::runtime_error(err_msg);
-  }
-
-  auto const d2h_sync_status = cudaStreamSynchronize(stream.value());
-  if (d2h_sync_status != cudaSuccess) {
-    auto err_msg = cuda_error(d2h_sync_status, "cudaStreamSynchronize");
-    cleanup();
-    throw std::runtime_error(err_msg);
-  }
-
-  cleanup();
-  return out_host;
 }
 
-using encode_dispatch_fn =
-  std::vector<uint64_t> (*)(std::vector<uint64_t> const&, uint64_t, uint32_t);
-using decode_dispatch_fn =
-  std::vector<uint64_t> (*)(std::vector<uint64_t> const&, uint64_t, uint32_t);
-
-template <uint8_t BW>
-[[nodiscard]] std::vector<uint64_t> encode_dispatch_wrapper(std::vector<uint64_t> const& values,
-                                                            uint64_t base_bits,
-                                                            uint32_t total_count)
-{
-  return encode_on_gpu<BW>(values, base_bits, total_count);
-}
-
-template <uint8_t BW>
-[[nodiscard]] std::vector<uint64_t> decode_dispatch_wrapper(std::vector<uint64_t> const& packed,
-                                                            uint64_t base_bits,
-                                                            uint32_t total_count)
-{
-  return decode_on_gpu<BW>(packed, base_bits, total_count);
-}
-
-inline constexpr std::array<encode_dispatch_fn, 65> kEncodeDispatch = {{
-  &encode_dispatch_wrapper<0>,
-  &encode_dispatch_wrapper<1>,
-  &encode_dispatch_wrapper<2>,
-  &encode_dispatch_wrapper<3>,
-  &encode_dispatch_wrapper<4>,
-  &encode_dispatch_wrapper<5>,
-  &encode_dispatch_wrapper<6>,
-  &encode_dispatch_wrapper<7>,
-  &encode_dispatch_wrapper<8>,
-  &encode_dispatch_wrapper<9>,
-  &encode_dispatch_wrapper<10>,
-  &encode_dispatch_wrapper<11>,
-  &encode_dispatch_wrapper<12>,
-  &encode_dispatch_wrapper<13>,
-  &encode_dispatch_wrapper<14>,
-  &encode_dispatch_wrapper<15>,
-  &encode_dispatch_wrapper<16>,
-  &encode_dispatch_wrapper<17>,
-  &encode_dispatch_wrapper<18>,
-  &encode_dispatch_wrapper<19>,
-  &encode_dispatch_wrapper<20>,
-  &encode_dispatch_wrapper<21>,
-  &encode_dispatch_wrapper<22>,
-  &encode_dispatch_wrapper<23>,
-  &encode_dispatch_wrapper<24>,
-  &encode_dispatch_wrapper<25>,
-  &encode_dispatch_wrapper<26>,
-  &encode_dispatch_wrapper<27>,
-  &encode_dispatch_wrapper<28>,
-  &encode_dispatch_wrapper<29>,
-  &encode_dispatch_wrapper<30>,
-  &encode_dispatch_wrapper<31>,
-  &encode_dispatch_wrapper<32>,
-  &encode_dispatch_wrapper<33>,
-  &encode_dispatch_wrapper<34>,
-  &encode_dispatch_wrapper<35>,
-  &encode_dispatch_wrapper<36>,
-  &encode_dispatch_wrapper<37>,
-  &encode_dispatch_wrapper<38>,
-  &encode_dispatch_wrapper<39>,
-  &encode_dispatch_wrapper<40>,
-  &encode_dispatch_wrapper<41>,
-  &encode_dispatch_wrapper<42>,
-  &encode_dispatch_wrapper<43>,
-  &encode_dispatch_wrapper<44>,
-  &encode_dispatch_wrapper<45>,
-  &encode_dispatch_wrapper<46>,
-  &encode_dispatch_wrapper<47>,
-  &encode_dispatch_wrapper<48>,
-  &encode_dispatch_wrapper<49>,
-  &encode_dispatch_wrapper<50>,
-  &encode_dispatch_wrapper<51>,
-  &encode_dispatch_wrapper<52>,
-  &encode_dispatch_wrapper<53>,
-  &encode_dispatch_wrapper<54>,
-  &encode_dispatch_wrapper<55>,
-  &encode_dispatch_wrapper<56>,
-  &encode_dispatch_wrapper<57>,
-  &encode_dispatch_wrapper<58>,
-  &encode_dispatch_wrapper<59>,
-  &encode_dispatch_wrapper<60>,
-  &encode_dispatch_wrapper<61>,
-  &encode_dispatch_wrapper<62>,
-  &encode_dispatch_wrapper<63>,
-  &encode_dispatch_wrapper<64>,
+inline constexpr std::array<encode_device_ptr_dispatch_fn, 65> kEncodeDevicePtrDispatch = {{
+#define ENCODE_DISPATCH_ENTRY(BW) &encode_device_ptr_dispatch_wrapper<BW>,
+  NATIVE64_FOR_EACH_BW(ENCODE_DISPATCH_ENTRY)
+#undef ENCODE_DISPATCH_ENTRY
 }};
 
-inline constexpr std::array<decode_dispatch_fn, 65> kDecodeDispatch = {{
-  &decode_dispatch_wrapper<0>,
-  &decode_dispatch_wrapper<1>,
-  &decode_dispatch_wrapper<2>,
-  &decode_dispatch_wrapper<3>,
-  &decode_dispatch_wrapper<4>,
-  &decode_dispatch_wrapper<5>,
-  &decode_dispatch_wrapper<6>,
-  &decode_dispatch_wrapper<7>,
-  &decode_dispatch_wrapper<8>,
-  &decode_dispatch_wrapper<9>,
-  &decode_dispatch_wrapper<10>,
-  &decode_dispatch_wrapper<11>,
-  &decode_dispatch_wrapper<12>,
-  &decode_dispatch_wrapper<13>,
-  &decode_dispatch_wrapper<14>,
-  &decode_dispatch_wrapper<15>,
-  &decode_dispatch_wrapper<16>,
-  &decode_dispatch_wrapper<17>,
-  &decode_dispatch_wrapper<18>,
-  &decode_dispatch_wrapper<19>,
-  &decode_dispatch_wrapper<20>,
-  &decode_dispatch_wrapper<21>,
-  &decode_dispatch_wrapper<22>,
-  &decode_dispatch_wrapper<23>,
-  &decode_dispatch_wrapper<24>,
-  &decode_dispatch_wrapper<25>,
-  &decode_dispatch_wrapper<26>,
-  &decode_dispatch_wrapper<27>,
-  &decode_dispatch_wrapper<28>,
-  &decode_dispatch_wrapper<29>,
-  &decode_dispatch_wrapper<30>,
-  &decode_dispatch_wrapper<31>,
-  &decode_dispatch_wrapper<32>,
-  &decode_dispatch_wrapper<33>,
-  &decode_dispatch_wrapper<34>,
-  &decode_dispatch_wrapper<35>,
-  &decode_dispatch_wrapper<36>,
-  &decode_dispatch_wrapper<37>,
-  &decode_dispatch_wrapper<38>,
-  &decode_dispatch_wrapper<39>,
-  &decode_dispatch_wrapper<40>,
-  &decode_dispatch_wrapper<41>,
-  &decode_dispatch_wrapper<42>,
-  &decode_dispatch_wrapper<43>,
-  &decode_dispatch_wrapper<44>,
-  &decode_dispatch_wrapper<45>,
-  &decode_dispatch_wrapper<46>,
-  &decode_dispatch_wrapper<47>,
-  &decode_dispatch_wrapper<48>,
-  &decode_dispatch_wrapper<49>,
-  &decode_dispatch_wrapper<50>,
-  &decode_dispatch_wrapper<51>,
-  &decode_dispatch_wrapper<52>,
-  &decode_dispatch_wrapper<53>,
-  &decode_dispatch_wrapper<54>,
-  &decode_dispatch_wrapper<55>,
-  &decode_dispatch_wrapper<56>,
-  &decode_dispatch_wrapper<57>,
-  &decode_dispatch_wrapper<58>,
-  &decode_dispatch_wrapper<59>,
-  &decode_dispatch_wrapper<60>,
-  &decode_dispatch_wrapper<61>,
-  &decode_dispatch_wrapper<62>,
-  &decode_dispatch_wrapper<63>,
-  &decode_dispatch_wrapper<64>,
+inline constexpr std::array<decode_device_ptr_dispatch_fn, 65> kDecodeDevicePtrDispatch = {{
+#define DECODE_DISPATCH_ENTRY(BW) &decode_device_ptr_dispatch_wrapper<BW>,
+  NATIVE64_FOR_EACH_BW(DECODE_DISPATCH_ENTRY)
+#undef DECODE_DISPATCH_ENTRY
 }};
 
-[[nodiscard]] inline std::vector<uint64_t> encode_by_bw_gpu(uint8_t bw,
-                                                            std::vector<uint64_t> const& values,
-                                                            uint64_t base_bits,
-                                                            uint32_t total_count)
+inline void encode_by_bw_gpu_device_ptrs(uint8_t bw,
+                                         uint64_t const* values,
+                                         uint64_t* packed,
+                                         uint64_t base_bits,
+                                         uint32_t total_count,
+                                         cudaStream_t stream)
 {
-  if (bw > 64) { throw std::invalid_argument("encode_by_bw_gpu requires bw in [0,64]"); }
-  return kEncodeDispatch[bw](values, base_bits, total_count);
+  if (bw > 64) {
+    throw std::invalid_argument("encode_by_bw_gpu_device_ptrs requires bw in [0,64]");
+  }
+  kEncodeDevicePtrDispatch[bw](values, packed, base_bits, total_count, stream);
 }
 
-[[nodiscard]] inline std::vector<uint64_t> decode_by_bw_gpu(uint8_t bw,
-                                                            std::vector<uint64_t> const& packed,
-                                                            uint64_t base_bits,
-                                                            uint32_t total_count)
+inline void decode_by_bw_gpu_device_ptrs(uint8_t bw,
+                                         uint64_t const* packed,
+                                         uint64_t* decoded,
+                                         uint64_t base_bits,
+                                         uint32_t total_count,
+                                         cudaStream_t stream)
 {
-  if (bw > 64) { throw std::invalid_argument("decode_by_bw_gpu requires bw in [0,64]"); }
-  return kDecodeDispatch[bw](packed, base_bits, total_count);
+  if (bw > 64) {
+    throw std::invalid_argument("decode_by_bw_gpu_device_ptrs requires bw in [0,64]");
+  }
+  kDecodeDevicePtrDispatch[bw](packed, decoded, base_bits, total_count, stream);
 }
+
+// Backward-compatible aliases. Inputs/outputs still must be CUDA device pointers.
+inline void encode_by_bw_gpu(uint8_t bw,
+                             uint64_t const* values,
+                             uint64_t* packed,
+                             uint64_t base_bits,
+                             uint32_t total_count,
+                             cudaStream_t stream)
+{
+  encode_by_bw_gpu_device_ptrs(bw, values, packed, base_bits, total_count, stream);
+}
+
+inline void decode_by_bw_gpu(uint8_t bw,
+                             uint64_t const* packed,
+                             uint64_t* decoded,
+                             uint64_t base_bits,
+                             uint32_t total_count,
+                             cudaStream_t stream)
+{
+  decode_by_bw_gpu_device_ptrs(bw, packed, decoded, base_bits, total_count, stream);
+}
+
+#undef NATIVE64_FOR_EACH_BW
 
 }  // namespace native64_generated

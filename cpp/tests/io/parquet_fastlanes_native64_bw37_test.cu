@@ -205,6 +205,192 @@ enum class data_pattern : uint8_t { randomized, adversarial, pathological };
 
 #include <cudf/fastlanes/native64_bw37_cuda_kernels.inl>
 
+[[nodiscard]] std::vector<uint64_t> encode_bw37_on_gpu(std::vector<uint64_t> const& values,
+                                                        uint64_t base_bits,
+                                                        uint32_t total_count)
+{
+  auto const stream       = cudf::get_default_stream();
+  auto const padded_count = static_cast<uint32_t>(fastlanes::padded_count(total_count));
+  auto const num_vectors  = static_cast<uint32_t>(fastlanes::num_vectors(total_count));
+
+  if (values.size() != padded_count) {
+    throw std::invalid_argument("encode_bw37_on_gpu values size mismatch");
+  }
+
+  std::vector<uint64_t> packed(static_cast<size_t>(num_vectors) * kWordsPerVector37, 0ULL);
+
+  uint64_t* d_values = nullptr;
+  uint64_t* d_packed = nullptr;
+
+  auto const values_bytes = values.size() * sizeof(uint64_t);
+  auto const packed_bytes = packed.size() * sizeof(uint64_t);
+
+  if (values_bytes > 0) {
+    auto const malloc_values_status = cudaMalloc(reinterpret_cast<void**>(&d_values), values_bytes);
+    if (malloc_values_status != cudaSuccess) {
+      throw std::runtime_error(cuda_error(malloc_values_status, "cudaMalloc(d_values)"));
+    }
+  }
+
+  if (packed_bytes > 0) {
+    auto const malloc_packed_status = cudaMalloc(reinterpret_cast<void**>(&d_packed), packed_bytes);
+    if (malloc_packed_status != cudaSuccess) {
+      if (d_values != nullptr) { cudaFree(d_values); }
+      throw std::runtime_error(cuda_error(malloc_packed_status, "cudaMalloc(d_packed)"));
+    }
+  }
+
+  auto cleanup = [&]() {
+    if (d_values != nullptr) { cudaFree(d_values); }
+    if (d_packed != nullptr) { cudaFree(d_packed); }
+  };
+
+  if (values_bytes > 0) {
+    auto const h2d_status = cudaMemcpyAsync(
+      d_values, values.data(), values_bytes, cudaMemcpyHostToDevice, stream.value());
+    if (h2d_status != cudaSuccess) {
+      auto err_msg = cuda_error(h2d_status, "cudaMemcpy H2D values");
+      cleanup();
+      throw std::runtime_error(err_msg);
+    }
+  }
+
+  if (packed_bytes > 0) {
+    auto const memset_status = cudaMemsetAsync(d_packed, 0, packed_bytes, stream.value());
+    if (memset_status != cudaSuccess) {
+      auto err_msg = cuda_error(memset_status, "cudaMemset packed");
+      cleanup();
+      throw std::runtime_error(err_msg);
+    }
+  }
+
+  encode_bw37_gpu(d_values, d_packed, base_bits, total_count, stream.value());
+
+  auto const sync_status = cudaStreamSynchronize(stream.value());
+  if (sync_status != cudaSuccess) {
+    auto err_msg = cuda_error(sync_status, "cudaStreamSynchronize");
+    cleanup();
+    throw std::runtime_error(err_msg);
+  }
+
+  if (packed_bytes > 0) {
+    auto const d2h_status = cudaMemcpyAsync(
+      packed.data(), d_packed, packed_bytes, cudaMemcpyDeviceToHost, stream.value());
+    if (d2h_status != cudaSuccess) {
+      auto err_msg = cuda_error(d2h_status, "cudaMemcpy D2H packed");
+      cleanup();
+      throw std::runtime_error(err_msg);
+    }
+
+    auto const d2h_sync_status = cudaStreamSynchronize(stream.value());
+    if (d2h_sync_status != cudaSuccess) {
+      auto err_msg = cuda_error(d2h_sync_status, "cudaStreamSynchronize");
+      cleanup();
+      throw std::runtime_error(err_msg);
+    }
+  }
+
+  cleanup();
+  return packed;
+}
+
+[[nodiscard]] std::vector<uint64_t> decode_bw37_on_gpu(std::vector<uint64_t> const& packed,
+                                                        uint64_t base_bits,
+                                                        uint32_t total_count)
+{
+  auto const stream       = cudf::get_default_stream();
+  auto const padded_count = static_cast<size_t>(fastlanes::padded_count(total_count));
+  auto const num_vectors  = static_cast<size_t>(fastlanes::num_vectors(total_count));
+  auto const expected_packed_size = num_vectors * static_cast<size_t>(kWordsPerVector37);
+
+  if (packed.size() != expected_packed_size) {
+    throw std::invalid_argument("decode_bw37_on_gpu packed size mismatch");
+  }
+
+  std::vector<uint64_t> out_host(padded_count, 0ULL);
+
+  auto const packed_bytes       = packed.size() * sizeof(uint64_t);
+  auto const packed_alloc_words = std::max<size_t>(packed.size(), 1U);
+  auto const packed_alloc_bytes = packed_alloc_words * sizeof(uint64_t);
+  auto const decoded_bytes      = out_host.size() * sizeof(uint64_t);
+
+  uint64_t* d_packed  = nullptr;
+  uint64_t* d_decoded = nullptr;
+
+  auto const malloc_packed_status = cudaMalloc(reinterpret_cast<void**>(&d_packed), packed_alloc_bytes);
+  if (malloc_packed_status != cudaSuccess) {
+    throw std::runtime_error(cuda_error(malloc_packed_status, "cudaMalloc(d_packed)"));
+  }
+
+  if (decoded_bytes > 0) {
+    auto const malloc_out_status = cudaMalloc(reinterpret_cast<void**>(&d_decoded), decoded_bytes);
+    if (malloc_out_status != cudaSuccess) {
+      cudaFree(d_packed);
+      throw std::runtime_error(cuda_error(malloc_out_status, "cudaMalloc(d_decoded)"));
+    }
+  }
+
+  auto cleanup = [&]() {
+    if (d_packed != nullptr) { cudaFree(d_packed); }
+    if (d_decoded != nullptr) { cudaFree(d_decoded); }
+  };
+
+  if (packed_bytes > 0) {
+    auto const h2d_status = cudaMemcpyAsync(
+      d_packed, packed.data(), packed_bytes, cudaMemcpyHostToDevice, stream.value());
+    if (h2d_status != cudaSuccess) {
+      auto err_msg = cuda_error(h2d_status, "cudaMemcpy H2D packed");
+      cleanup();
+      throw std::runtime_error(err_msg);
+    }
+  } else {
+    auto const packed_init_status = cudaMemsetAsync(d_packed, 0, packed_alloc_bytes, stream.value());
+    if (packed_init_status != cudaSuccess) {
+      auto err_msg = cuda_error(packed_init_status, "cudaMemset packed sentinel");
+      cleanup();
+      throw std::runtime_error(err_msg);
+    }
+  }
+
+  if (decoded_bytes > 0) {
+    auto const memset_status = cudaMemsetAsync(d_decoded, 0, decoded_bytes, stream.value());
+    if (memset_status != cudaSuccess) {
+      auto err_msg = cuda_error(memset_status, "cudaMemset decoded");
+      cleanup();
+      throw std::runtime_error(err_msg);
+    }
+  }
+
+  decode_bw37_gpu(d_packed, d_decoded, base_bits, total_count, stream.value());
+
+  auto const sync_status = cudaStreamSynchronize(stream.value());
+  if (sync_status != cudaSuccess) {
+    auto err_msg = cuda_error(sync_status, "cudaStreamSynchronize");
+    cleanup();
+    throw std::runtime_error(err_msg);
+  }
+
+  if (decoded_bytes > 0) {
+    auto const d2h_status = cudaMemcpyAsync(
+      out_host.data(), d_decoded, decoded_bytes, cudaMemcpyDeviceToHost, stream.value());
+    if (d2h_status != cudaSuccess) {
+      auto err_msg = cuda_error(d2h_status, "cudaMemcpy D2H decoded");
+      cleanup();
+      throw std::runtime_error(err_msg);
+    }
+
+    auto const d2h_sync_status = cudaStreamSynchronize(stream.value());
+    if (d2h_sync_status != cudaSuccess) {
+      auto err_msg = cuda_error(d2h_sync_status, "cudaStreamSynchronize");
+      cleanup();
+      throw std::runtime_error(err_msg);
+    }
+  }
+
+  cleanup();
+  return out_host;
+}
+
 struct parity_evidence {
   size_t cpu_roundtrip_mismatch{};
   size_t gpu_pack_mismatch{};
