@@ -191,7 +191,7 @@ enum class data_pattern : uint8_t { randomized, adversarial, pathological };
   return oss.str();
 }
 
-#include <cudf/fastlanes/native64_bw_kernels.inl>
+#include <cudf/fastlanes/native64_cuda_kernels.inl>
 
 struct parity_evidence {
   size_t cpu_roundtrip_mismatch{};
@@ -305,7 +305,7 @@ TEST_F(ParquetFastLanesNative64GeneratedTest, AnchorMatrixParity)
     }
   }
 
-  std::cout << report.str() << std::endl;
+  // std::cout << report.str() << std::endl;
 }
 
 TEST_F(ParquetFastLanesNative64GeneratedTest, FullSweepParityMatrix)
@@ -333,7 +333,7 @@ TEST_F(ParquetFastLanesNative64GeneratedTest, FullSweepParityMatrix)
     if (bw == 64) { break; }
   }
 
-  std::cout << report.str() << std::endl;
+  // std::cout << report.str() << std::endl;
 }
 
 TEST_F(ParquetFastLanesNative64GeneratedTest, StabilityRepeatsSelectedSeeds)
@@ -362,5 +362,5 @@ TEST_F(ParquetFastLanesNative64GeneratedTest, StabilityRepeatsSelectedSeeds)
     }
   }
 
-  std::cout << report.str() << std::endl;
+  // std::cout << report.str() << std::endl;
 }

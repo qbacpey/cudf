@@ -1,9 +1,9 @@
 Yes. For BW37 CUDA-argument experiments, the existing test stack is enough to validate correctness if you run it in a fixed order.
 
 **Where Your BW37 Argument Change Must Propagate**
-1. Kernel signatures live in parquet_fastlanes_native64_bw37_cuda_kernels.inl.
-2. Kernel launch sites are in parquet_fastlanes_native64_bw37_cuda_kernels.inl.
-3. Host wrappers that call those kernels are in parquet_fastlanes_native64_bw37_cuda_kernels.inl.
+1. Kernel signatures live in native64_bw37_cuda_kernels.inl.
+2. Kernel launch sites are in native64_bw37_cuda_kernels.inl.
+3. Host wrappers that call those kernels are in native64_bw37_cuda_kernels.inl.
 4. BW37 test callsites are in parquet_fastlanes_native64_bw37_test.cu.
 5. The moved include is now consumed from parquet_fastlanes_native64_bw37_test.cu.
 
@@ -35,13 +35,13 @@ cd "$CUDF_HOME"
 
 # 1) Sanity: moved include is still referenced correctly
 if command -v rg >/dev/null 2>&1; then
-  rg -n "parquet_fastlanes_native64_bw37_cuda_kernels\.inl" \
+  rg -n "native64_bw37_cuda_kernels\.inl" \
     cpp/tests/io/parquet_fastlanes_native64_bw37_test.cu \
-    cpp/include/cudf/fastlanes/parquet_fastlanes_native64_bw37_cuda_kernels.inl
+    cpp/include/cudf/fastlanes/native64_bw37_cuda_kernels.inl
 else
-  grep -nE "parquet_fastlanes_native64_bw37_cuda_kernels\.inl" \
+  grep -nE "native64_bw37_cuda_kernels\.inl" \
     cpp/tests/io/parquet_fastlanes_native64_bw37_test.cu \
-    cpp/include/cudf/fastlanes/parquet_fastlanes_native64_bw37_cuda_kernels.inl
+    cpp/include/cudf/fastlanes/native64_bw37_cuda_kernels.inl
 fi
 
 # 2) Build tests with /tmp fallback

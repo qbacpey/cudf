@@ -13,7 +13,7 @@ Produce an implementable and low-risk strategy to scale the FL64 prototype logic
 
 ## FL64-R3 Evidence Anchors
 - Test baseline: `cpp/tests/io/parquet_fastlanes_native64_bw37_test.cu`
-- Test CUDA helper include: `cpp/include/cudf/fastlanes/parquet_fastlanes_native64_bw37_cuda_kernels.inl`
+- CUDA helper include: `cpp/include/cudf/fastlanes/native64_bw37_cuda_kernels.inl`
 - Fastlanes gtest target wiring: `cpp/tests/CMakeLists.txt` (`PARQUET_FASTLANES_TEST`)
 - Prior fastlanes integration report: `cpp/examples/parquet_io/docs/fastlanes/FASTLANES_INTEGRATION_REPORT_2026-03-28.md`
 - Prior split64 sensitivity report: `cpp/examples/parquet_io/docs/fastlanes/INT64_SNAPPY_DELTA_VS_FASTLANES_REPORT_2026-04-02.md`
@@ -27,7 +27,7 @@ cpp/build/gtests/PARQUET_FASTLANES_TEST --gtest_filter=ParquetFastLanesNative64B
 ## Scope Guardrails
 - Allowed scope:
   - Planning and design documents.
-  - Test-only generation utility and test-only helper artifacts.
+  - Parity-harness generation utility and helper artifacts.
 - Forbidden scope:
   - Production reader, writer, header/runtime paths.
   - `cpp/src/io/parquet/**`
@@ -44,8 +44,8 @@ cpp/build/gtests/PARQUET_FASTLANES_TEST --gtest_filter=ParquetFastLanesNative64B
 ## Ownership and Artifact Matrix
 | Artifact | Type | Owner | Backup Reviewer | Source of Truth | Output Path | Gate |
 |---|---|---|---|---|---|---|
-| Native64 bw matrix contract (bw, words_per_lane, cross-boundary map) | Embedded metadata (test-only) | qbacpey | qbacpey | Script defaults in run helper | cpp/examples/parquet_io/tools/tests/run_parity_matrix.py | FL64-R4-M1 |
-| CUDA kernel include (bw0..64, test-only) | Generated code | qbacpey | qbacpey | Finalized checked-in include | cpp/include/cudf/fastlanes/native64_bw_kernels.inl | FL64-R4-M2 |
+| Native64 bw matrix contract (bw, words_per_lane, cross-boundary map) | Embedded metadata (parity harness) | qbacpey | qbacpey | Script defaults in run helper | cpp/examples/parquet_io/tools/tests/run_parity_matrix.py | FL64-R4-M1 |
+| CUDA kernel include (bw0..64, parity harness) | Generated code | qbacpey | qbacpey | Finalized checked-in include | cpp/include/cudf/fastlanes/native64_cuda_kernels.inl | FL64-R4-M2 |
 | CPU oracle compare harness glue | Handwritten test glue | qbacpey | qbacpey | Test source | cpp/tests/io/parquet_fastlanes_native64_generated_test.cu | FL64-R4-M2 |
 | Parity matrix executor (anchor + full sweep) | Test utility | qbacpey | qbacpey | Embedded defaults + CLI overrides | cpp/examples/parquet_io/tools/tests/run_parity_matrix.py | FL64-R4-M3 |
 | Run evidence summary | Report | qbacpey | qbacpey | CI/remote logs | parquet_io_shared/reports/cudf-fastlane/<run_tag>/r4_matrix_summary.json | FL64-R4-M3 |
@@ -104,7 +104,7 @@ cpp/build/gtests/PARQUET_FASTLANES_TEST --gtest_filter=ParquetFastLanesNative64B
   - zero parity mismatches for all matrix cells.
   - stable checksums across repeated runs (>= 3 repeats for selected seeds).
 
-## Graduation Criteria: Test-Only -> Production Candidate
+## Graduation Criteria: Parity Harness -> Production Candidate
 All conditions must be true before any production-path proposal:
 1. Anchor matrix passed for all required checks.
 2. Full sweep 0..64 passed with zero mismatches.
@@ -139,6 +139,7 @@ Rollback R4 outputs immediately if either condition occurs:
 
 ## Unresolved Issues
 - Native64 parquet header contract detail (encoding metadata representation) remains pending and is intentionally deferred to post-R4 production design review.
+- Stage 2 production follow-up packet is tracked in `cpp/examples/parquet_io/docs/fastlanes/fastlanes_native64_stage2_design_packet.md` (design-only, no implementation edits).
 
 ## Post-R4 bw37 Deprecation Criteria (Deferred)
 The bw37-only suite may be considered for deprecation only after all of the following are true:
@@ -161,7 +162,7 @@ The bw37-only suite may be considered for deprecation only after all of the foll
   - embedded matrix defaults in `run_parity_matrix.py` cover the required anchor and full-sweep contract.
   - Ownership row for spec artifact is explicit.
 2. FL64-R4-M2 gate:
-  - Finalized generated include exists at `cpp/include/cudf/fastlanes/native64_bw_kernels.inl`.
+  - Finalized generated include exists at `cpp/include/cudf/fastlanes/native64_cuda_kernels.inl`.
   - Generated harness uses the relocated include path without semantic drift.
 3. FL64-R4-M3 gate:
   - Anchor matrix parity passes.

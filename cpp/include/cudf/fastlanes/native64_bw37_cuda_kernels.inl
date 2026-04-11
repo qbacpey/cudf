@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Test-only CUDA helpers for FL64 bw37 parity.
+ * CUDA helpers for FL64 bw37 parity harness.
  * This file is intentionally included by parquet_fastlanes_native64_bw37_test.cu
  * inside its anonymous namespace and expects constants plus cuda_error() from
  * the including translation unit.

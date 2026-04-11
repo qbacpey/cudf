@@ -203,7 +203,7 @@ enum class data_pattern : uint8_t { randomized, adversarial, pathological };
   return oss.str();
 }
 
-#include <cudf/fastlanes/parquet_fastlanes_native64_bw37_cuda_kernels.inl>
+#include <cudf/fastlanes/native64_bw37_cuda_kernels.inl>
 
 struct parity_evidence {
   size_t cpu_roundtrip_mismatch{};
@@ -288,7 +288,7 @@ TEST_F(ParquetFastLanesNative64Bw37Test, CpuOracleBoundaryFixturesDeterministic)
            << std::dec;
   }
 
-  std::cout << report.str() << std::endl;
+  // std::cout << report.str() << std::endl;
 }
 
 TEST_F(ParquetFastLanesNative64Bw37Test, CpuOracleBw37AdversarialFixtureDeterministic)
@@ -347,7 +347,7 @@ TEST_F(ParquetFastLanesNative64Bw37Test, GpuBw37ParityRandomizedAndAdversarial)
     }
   }
 
-  std::cout << report.str() << std::endl;
+  // std::cout << report.str() << std::endl;
 }
 
 TEST_F(ParquetFastLanesNative64Bw37Test, GpuBw37ParityTailBoundariesExtremeAndPathological)
@@ -384,7 +384,7 @@ TEST_F(ParquetFastLanesNative64Bw37Test, GpuBw37ParityTailBoundariesExtremeAndPa
     }
   }
 
-  std::cout << report.str() << std::endl;
+  // std::cout << report.str() << std::endl;
 }
 
 TEST_F(ParquetFastLanesNative64Bw37Test, GpuBw37ParityRepeatedRunStability)
@@ -422,5 +422,5 @@ TEST_F(ParquetFastLanesNative64Bw37Test, GpuBw37ParityRepeatedRunStability)
     }
   }
 
-  std::cout << report.str() << std::endl;
+  // std::cout << report.str() << std::endl;
 }

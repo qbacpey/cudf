@@ -218,59 +218,5 @@ START NOW
 
 MY OBJECTIVE BEGIN
 
-Implement a test-only refactor that makes bw37 helper kernels use compile-time configurable
-N threads per block where N is a multiple of 16, with default N=32, while preserving the
-existing 16-lane striped bitstream contract.
-
-Hard constraints
-- Scope is limited to test-only paths; do not modify production reader, writer, or runtime code.
-- Keep lane-striped bw37 packing semantics unchanged.
-- No transition window, no compatibility aliases, and no temporary dual mapping.
-
-Required mapping and launch model
-1. Add compile-time constants in parquet_fastlanes_native64_bw37_cuda_kernels.inl:
-
-      constexpr uint32_t kThreadsPerBlockBw37 = 32;
-      static_assert(kThreadsPerBlockBw37 >= 16);
-      static_assert((kThreadsPerBlockBw37 % 16) == 0);
-      constexpr uint32_t kVectorsPerBlockBw37 = kThreadsPerBlockBw37 / 16;
-
-2. Encode and decode kernels must use:
-
-      auto const tid       = static_cast<uint32_t>(threadIdx.x);
-      auto const subvec    = tid / 16;
-      auto const lane      = tid % 16;
-      auto const vector_id = static_cast<uint32_t>(blockIdx.x) * kVectorsPerBlockBw37 + subvec;
-
-      auto const vector_start = vector_id * kVectorSize;
-      if (vector_start >= padded_count) { return; }
-
-3. Launch geometry for both wrappers must use:
-
-      auto const num_blocks =
-         (num_vectors + kVectorsPerBlockBw37 - 1) / kVectorsPerBlockBw37;
-
-      <<<num_blocks, kThreadsPerBlockBw37, 0, stream.value()>>>
-
-Validation cadence and gates
-- Every run (no exceptions):
-   - CUDF_HOME/build.sh libcudf tests
-   - PARQUET_FASTLANES_TEST --gtest_filter=ParquetFastLanesNative64Bw37Test.*
-   - ctest --output-on-failure --no-tests=error
-
-- Milestone expansion:
-   - Anchor test:
-      PARQUET_FASTLANES_TEST --gtest_filter=ParquetFastLanesNative64GeneratedTest.AnchorMatrixParity
-   - Matrix anchor + bw37 guard:
-      python run_parity_matrix.py --gtest-binary cpp/build/gtests/PARQUET_FASTLANES_TEST --run-tag rt_YYYYMMDD_x --report-json /home/qchen/04_GPUFileFormat-cudf/parquet_io_shared/reports/cudf-fastlane/rt_YYYYMMDD_x/r4_matrix_summary.json --phase anchor --with-bw37-guard
-   - Matrix all + stability + bw37 guard:
-      python run_parity_matrix.py --gtest-binary cpp/build/gtests/PARQUET_FASTLANES_TEST --run-tag rt_YYYYMMDD_x --report-json /home/qchen/04_GPUFileFormat-cudf/parquet_io_shared/reports/cudf-fastlane/rt_YYYYMMDD_x/r4_matrix_summary.json --phase all --with-stability --with-bw37-guard
-   - Final heavy matrix checkpoint:
-      python run_parity_matrix.py --gtest-binary cpp/build/gtests/PARQUET_FASTLANES_TEST --run-tag rt_YYYYMMDD_x --report-json /home/qchen/04_GPUFileFormat-cudf/parquet_io_shared/reports/cudf-fastlane/rt_YYYYMMDD_x/r4_matrix_summary.json --phase all --with-stability --with-bw37-guard --with-ctest
-
-Acceptance
-- bw37 and generated milestone tests pass.
-- Heavy checkpoints pass.
-- Report JSON contains all_passed=true, failed_commands=0, and path_policy_ok=true.
 
 MY OBJECTIVE END
