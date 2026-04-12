@@ -10,10 +10,12 @@
 #include <cudf/fastlanes/fls_gen/unpack/unpack.hpp>
 #include <cudf/utilities/default_stream.hpp>
 
-#include <cub/cub.cuh>
 #include <cuda_runtime_api.h>
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_buffer.hpp>
+#include <rmm/exec_policy.hpp>
+#include <thrust/extrema.h>
+#include <thrust/reduce.h>
 
 #include <algorithm>
 #include <array>
@@ -30,9 +32,6 @@ namespace {
 
 class ParquetFastLanesNative64GeneratedTest : public cudf::test::BaseFixture {};
 
-constexpr uint32_t kVectorSize     = static_cast<uint32_t>(fastlanes::VECTOR_SIZE);
-constexpr uint32_t kLanesPerVector = 16;
-constexpr uint32_t kValuesPerLane  = 64;
 constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ULL;
 constexpr uint64_t kFnvPrime       = 1099511628211ULL;
 
@@ -137,19 +136,22 @@ enum class data_pattern : uint8_t { randomized, adversarial, pathological };
 [[nodiscard]] std::vector<uint64_t> pack_bw_vectors_cpu(std::vector<uint64_t> const& padded_deltas,
                                                         uint8_t bw)
 {
-  if (padded_deltas.size() % kVectorSize != 0) {
+  constexpr size_t kLocalVectorSize = static_cast<size_t>(fastlanes::VECTOR_SIZE);
+
+  if (padded_deltas.size() % kLocalVectorSize != 0) {
     throw std::invalid_argument("pack_bw_vectors_cpu expects padded 1024-multiple input");
   }
 
   auto const words_per_vector =
-    static_cast<size_t>(fastlanes::encoded_size_bytes(kVectorSize, bw) / sizeof(uint64_t));
-  auto const num_vectors = padded_deltas.size() / kVectorSize;
+    static_cast<size_t>(fastlanes::encoded_size_bytes(static_cast<uint32_t>(kLocalVectorSize), bw) /
+                        sizeof(uint64_t));
+  auto const num_vectors = padded_deltas.size() / kLocalVectorSize;
 
   if (words_per_vector == 0) { return {}; }
 
   std::vector<uint64_t> packed(num_vectors * words_per_vector, 0ULL);
   for (size_t v = 0; v < num_vectors; ++v) {
-    generated::pack::fallback::scalar::pack(padded_deltas.data() + v * kVectorSize,
+    generated::pack::fallback::scalar::pack(padded_deltas.data() + v * kLocalVectorSize,
                                             packed.data() + v * words_per_vector,
                                             bw);
   }
@@ -161,18 +163,21 @@ enum class data_pattern : uint8_t { randomized, adversarial, pathological };
                                                           size_t padded_count,
                                                           uint8_t bw)
 {
-  if (padded_count % kVectorSize != 0) {
+  constexpr size_t kLocalVectorSize = static_cast<size_t>(fastlanes::VECTOR_SIZE);
+
+  if (padded_count % kLocalVectorSize != 0) {
     throw std::invalid_argument("unpack_bw_vectors_cpu expects padded_count multiple of 1024");
   }
 
   auto const words_per_vector =
-    static_cast<size_t>(fastlanes::encoded_size_bytes(kVectorSize, bw) / sizeof(uint64_t));
+    static_cast<size_t>(fastlanes::encoded_size_bytes(static_cast<uint32_t>(kLocalVectorSize), bw) /
+                        sizeof(uint64_t));
 
   if (words_per_vector == 0) {
     return std::vector<uint64_t>(padded_count, 0ULL);
   }
 
-  auto const num_vectors = padded_count / kVectorSize;
+  auto const num_vectors = padded_count / kLocalVectorSize;
   if (packed.size() != num_vectors * words_per_vector) {
     throw std::invalid_argument("unpack_bw_vectors_cpu packed size mismatch");
   }
@@ -180,7 +185,7 @@ enum class data_pattern : uint8_t { randomized, adversarial, pathological };
   std::vector<uint64_t> unpacked(padded_count, 0ULL);
   for (size_t v = 0; v < num_vectors; ++v) {
     generated::unpack::fallback::scalar::unpack(packed.data() + v * words_per_vector,
-                                                unpacked.data() + v * kVectorSize,
+                                                unpacked.data() + v * kLocalVectorSize,
                                                 bw);
   }
 

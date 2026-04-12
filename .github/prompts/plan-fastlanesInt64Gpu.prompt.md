@@ -34,7 +34,7 @@ Micro-runs (provisional)
   - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/parquet_gpu.hpp
 - Forbidden scope denylist:
   - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/page_fastlanes_decode.cu
-  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_bw_kernels.inl
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_cuda_kernels.inl
 - Concrete edit intent:
   - Update schema/encoding validation in writer path so FASTLANES_DELTA_BINARY is accepted only for INT64 leafs.
   - Keep existing FASTLANE_BITPACK_SPLIT64 behavior unchanged.
@@ -55,7 +55,7 @@ Micro-runs (provisional)
   - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/page_enc.cu
 - Forbidden scope denylist:
   - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/page_fastlanes_decode.cu
-  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_bw_kernels.inl
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_cuda_kernels.inl
 - Concrete edit intent:
   - Introduce gpuEncodeFastLanesInt64Pages kernel entrypoint (scaffold).
   - Wire stream selection and launch ordering consistent with existing encode pattern.
@@ -77,7 +77,7 @@ Micro-runs (provisional)
   - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/page_fastlanes_decode.cu
   - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/parquet_gpu.hpp
 - Forbidden scope denylist:
-  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_bw_kernels.inl
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_cuda_kernels.inl
 - Concrete edit intent:
   - Route FASTLANES_DELTA_BINARY pages to fastlanes decode kernel mask.
   - Add layout-based dispatch seam for INT64 path and a native64 stub launch point.

@@ -22,7 +22,7 @@ Produce an implementable and low-risk strategy to scale the FL64 prototype logic
 | Artifact | Type | Owner | Backup Reviewer | Source of Truth | Output Path | Gate |
 |---|---|---|---|---|---|---|
 | Native64 bw matrix contract (bw, words_per_lane, cross-boundary map) | Embedded metadata (test-only) | FastLanes test owner | IO parquet owner | Script defaults in run helper | cpp/examples/parquet_io/tools/tests/run_parity_matrix.py | FL64-R4-M1 |
-| CUDA kernel include (bw0..64, test-only) | Generated code | FastLanes test owner | CUDA reviewer | Finalized checked-in include | cpp/include/cudf/fastlanes/native64_bw_kernels.inl | FL64-R4-M2 |
+| CUDA kernel include (bw0..64, test-only) | Generated code | FastLanes test owner | CUDA reviewer | Finalized checked-in include | cpp/include/cudf/fastlanes/native64_cuda_kernels.inl | FL64-R4-M2 |
 | CPU oracle compare harness glue | Handwritten test glue | FastLanes test owner | QA owner | Test source | cpp/tests/io/parquet_fastlanes_native64_generated_test.cu | FL64-R4-M2 |
 | Parity matrix executor (anchor + full sweep) | Test utility | QA owner | FastLanes test owner | Embedded defaults + CLI overrides | cpp/examples/parquet_io/tools/tests/run_parity_matrix.py | FL64-R4-M3 |
 | Run evidence summary | Report | QA owner | IO parquet owner | CI/remote logs | parquet_io_shared/reports/cudf-fastlane/<run_tag>/r4_matrix_summary.json | FL64-R4-M3 |

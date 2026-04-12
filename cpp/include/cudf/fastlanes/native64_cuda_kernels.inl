@@ -2,7 +2,6 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  *
- * generated! Do not edit by hand.
  * Source metadata helper: cpp/examples/parquet_io/tools/tests/run_parity_matrix.py
  */
 
@@ -14,6 +13,10 @@ struct bw_row {
   uint32_t words_per_vector;
   uint8_t crossing_count;
 };
+
+constexpr uint32_t kVectorSize     = 1024;
+constexpr uint32_t kLanesPerVector = 16;
+constexpr uint32_t kValuesPerLane  = kVectorSize / kLanesPerVector;
 
 constexpr uint32_t kThreadsPerBlock = 32;
 constexpr uint32_t kVectorsPerBlock = kThreadsPerBlock / kLanesPerVector;
@@ -34,7 +37,7 @@ struct native64_encode_metadata {
 // ---------------------------------------------------------------------------
 
 // Stage-1 metadata reduction for Commit 3. This operates on the unpadded logical range.
-// Caller owns `d_base_bits`; temporary CUB storage is managed internally.
+// Caller owns `d_base_bits`.
 inline void derive_min_base_bits_metadata_to_device(uint64_t const* values,
                                                     uint32_t total_count,
                                                     uint64_t* d_base_bits,
@@ -61,30 +64,20 @@ inline void derive_min_base_bits_metadata_to_device(uint64_t const* values,
       "derive_min_base_bits_metadata_to_device requires non-null values when total_count > 0");
   }
 
-  size_t temp_storage_bytes = 0;
-  auto const query_status = cub::DeviceReduce::Min(
-    nullptr, temp_storage_bytes, values, d_base_bits, total_count, stream);
-  if (query_status != cudaSuccess) {
-    throw std::runtime_error(
-      cuda_error(query_status, "cub::DeviceReduce::Min temp storage query"));
-  }
+  auto const min_val = thrust::reduce(rmm::exec_policy(stream),
+                                      values,
+                                      values + total_count,
+                                      std::numeric_limits<uint64_t>::max(),
+                                      thrust::minimum<uint64_t>());
 
-  auto const stream_view = rmm::cuda_stream_view{stream};
-  auto d_temp_storage    = rmm::device_buffer(temp_storage_bytes, stream_view);
-
-  auto cub_temp_storage_bytes = temp_storage_bytes;
-  auto const reduce_status = cub::DeviceReduce::Min(
-    d_temp_storage.data(), cub_temp_storage_bytes, values, d_base_bits, total_count, stream);
-  if (reduce_status != cudaSuccess) {
-    throw std::runtime_error(cuda_error(reduce_status, "cub::DeviceReduce::Min"));
+  auto const copy_status =
+    cudaMemcpyAsync(d_base_bits, &min_val, sizeof(uint64_t), cudaMemcpyHostToDevice, stream);
+  if (copy_status != cudaSuccess) {
+    throw std::runtime_error(cuda_error(copy_status, "cudaMemcpyAsync base_bits H2D"));
   }
 
   if (h_base_bits_out != nullptr) {
-    auto const copy_status = cudaMemcpyAsync(
-      h_base_bits_out, d_base_bits, sizeof(uint64_t), cudaMemcpyDeviceToHost, stream);
-    if (copy_status != cudaSuccess) {
-      throw std::runtime_error(cuda_error(copy_status, "cudaMemcpyAsync base_bits D2H"));
-    }
+    *h_base_bits_out = min_val;
   }
 }
 
@@ -98,28 +91,18 @@ inline native64_encode_metadata derive_min_base_bits_metadata(uint64_t const* va
       "derive_min_base_bits_metadata requires non-null values when total_count > 0");
   }
 
-  uint64_t* d_base_bits = nullptr;
-
-  auto cleanup = [&]() {
-    if (d_base_bits != nullptr) { cudaFree(d_base_bits); }
-  };
-
-  auto const malloc_base_status = cudaMalloc(reinterpret_cast<void**>(&d_base_bits), sizeof(uint64_t));
-  if (malloc_base_status != cudaSuccess) {
-    throw std::runtime_error(cuda_error(malloc_base_status, "cudaMalloc(d_base_bits)"));
-  }
+  auto const stream_view = rmm::cuda_stream_view{stream};
+  auto d_base_bits       = rmm::device_buffer(sizeof(uint64_t), stream_view);
 
   native64_encode_metadata metadata{};
   derive_min_base_bits_metadata_to_device(
-    values, total_count, d_base_bits, stream, &metadata.base_bits);
+    values, total_count, static_cast<uint64_t*>(d_base_bits.data()), stream, &metadata.base_bits);
 
   auto const sync_status = cudaStreamSynchronize(stream);
   if (sync_status != cudaSuccess) {
-    cleanup();
     throw std::runtime_error(cuda_error(sync_status, "cudaStreamSynchronize metadata reduction"));
   }
 
-  cleanup();
   return metadata;
 }
 

@@ -136,7 +136,7 @@ Deliver a planning packet plus architecture and execution runbook for test-only 
 
 4. Editable scope (allowlist)
 - `cpp/examples/parquet_io/tools/tests/run_parity_matrix.py`
-- `cpp/include/cudf/fastlanes/native64_bw_kernels.inl`
+- `cpp/include/cudf/fastlanes/native64_cuda_kernels.inl`
 - `cpp/examples/parquet_io/docs/fastlanes/fastlanes_native64_r4_generation_strategy.md`
 
 5. Forbidden scope (denylist)
@@ -380,7 +380,7 @@ Deliver a planning packet plus architecture and execution runbook for test-only 
 - `docs/cudf/source/developer_guide/index.md` — canonical strategy doc discoverability in toctree.
 - `cpp/examples/parquet_io/docs/fastlanes/fastlanes_native64_r4_generation_strategy.md` — canonical R4 strategy destination.
 - `cpp/examples/parquet_io/tools/tests/run_parity_matrix.py` — embedded bw0..64 matrix contract source.
-- `cpp/include/cudf/fastlanes/native64_bw_kernels.inl` — finalized generated kernel include output.
+- `cpp/include/cudf/fastlanes/native64_cuda_kernels.inl` — finalized generated kernel include output.
 - `cpp/tests/io/parquet_fastlanes_native64_generated_test.cu` — planned generated parity harness glue.
 - `cpp/examples/parquet_io/tools/tests/run_parity_matrix.py` — planned parity matrix executor.
 
