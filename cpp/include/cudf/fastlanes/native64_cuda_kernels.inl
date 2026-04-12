@@ -15,50 +15,19 @@ struct bw_row {
   uint8_t crossing_count;
 };
 
-static_assert((1024 % kLanesPerVector) == 0,
-              "kLanesPerVector must divide 1024 for launch geometry");
 constexpr uint32_t kThreadsPerBlock = 32;
+constexpr uint32_t kVectorsPerBlock = kThreadsPerBlock / kLanesPerVector;
+
+static_assert((kVectorSize % kLanesPerVector) == 0,
+              "kLanesPerVector must divide 1024 for launch geometry");
 static_assert(kThreadsPerBlock >= kLanesPerVector,
               "kThreadsPerBlock must be at least kLanesPerVector");
 static_assert((kThreadsPerBlock % kLanesPerVector) == 0,
               "kThreadsPerBlock must be a multiple of kLanesPerVector");
-constexpr uint32_t kVectorsPerBlock = kThreadsPerBlock / kLanesPerVector;
 
 struct native64_encode_metadata {
   uint64_t base_bits{};
 };
-
-// ---------------------------------------------------------------------------
-// Metadata reduction helpers (internal)
-// ---------------------------------------------------------------------------
-namespace detail {
-
-[[nodiscard]] inline size_t query_min_reduce_temp_storage_bytes_u64(uint64_t const* values,
-                                                                    uint64_t* d_base_bits,
-                                                                    uint32_t total_count,
-                                                                    cudaStream_t stream)
-{
-  if (total_count == 0) { return 0; }
-  if (values == nullptr) {
-    throw std::invalid_argument(
-      "query_min_reduce_temp_storage_bytes_u64 requires non-null values when total_count > 0");
-  }
-  if (d_base_bits == nullptr) {
-    throw std::invalid_argument(
-      "query_min_reduce_temp_storage_bytes_u64 requires non-null d_base_bits");
-  }
-
-  size_t temp_storage_bytes = 0;
-  auto const query_status = cub::DeviceReduce::Min(
-    nullptr, temp_storage_bytes, values, d_base_bits, total_count, stream);
-  if (query_status != cudaSuccess) {
-    throw std::runtime_error(
-      cuda_error(query_status, "cub::DeviceReduce::Min temp storage query"));
-  }
-  return temp_storage_bytes;
-}
-
-}  // namespace detail
 
 // ---------------------------------------------------------------------------
 // Public metadata APIs (min-only Commit 3 stage)
@@ -92,21 +61,21 @@ inline void derive_min_base_bits_metadata_to_device(uint64_t const* values,
       "derive_min_base_bits_metadata_to_device requires non-null values when total_count > 0");
   }
 
-  void* d_temp_storage = nullptr;
-  auto const temp_storage_bytes =
-    detail::query_min_reduce_temp_storage_bytes_u64(values, d_base_bits, total_count, stream);
-  if (temp_storage_bytes > 0) {
-    auto const malloc_temp_status = cudaMalloc(&d_temp_storage, temp_storage_bytes);
-    if (malloc_temp_status != cudaSuccess) {
-      throw std::runtime_error(cuda_error(malloc_temp_status, "cudaMalloc(d_temp_storage)"));
-    }
+  size_t temp_storage_bytes = 0;
+  auto const query_status = cub::DeviceReduce::Min(
+    nullptr, temp_storage_bytes, values, d_base_bits, total_count, stream);
+  if (query_status != cudaSuccess) {
+    throw std::runtime_error(
+      cuda_error(query_status, "cub::DeviceReduce::Min temp storage query"));
   }
+
+  auto const stream_view = rmm::cuda_stream_view{stream};
+  auto d_temp_storage    = rmm::device_buffer(temp_storage_bytes, stream_view);
 
   auto cub_temp_storage_bytes = temp_storage_bytes;
   auto const reduce_status = cub::DeviceReduce::Min(
-    d_temp_storage, cub_temp_storage_bytes, values, d_base_bits, total_count, stream);
+    d_temp_storage.data(), cub_temp_storage_bytes, values, d_base_bits, total_count, stream);
   if (reduce_status != cudaSuccess) {
-    if (d_temp_storage != nullptr) { cudaFree(d_temp_storage); }
     throw std::runtime_error(cuda_error(reduce_status, "cub::DeviceReduce::Min"));
   }
 
@@ -114,15 +83,7 @@ inline void derive_min_base_bits_metadata_to_device(uint64_t const* values,
     auto const copy_status = cudaMemcpyAsync(
       h_base_bits_out, d_base_bits, sizeof(uint64_t), cudaMemcpyDeviceToHost, stream);
     if (copy_status != cudaSuccess) {
-      if (d_temp_storage != nullptr) { cudaFree(d_temp_storage); }
       throw std::runtime_error(cuda_error(copy_status, "cudaMemcpyAsync base_bits D2H"));
-    }
-  }
-
-  if (d_temp_storage != nullptr) {
-    auto const free_status = cudaFree(d_temp_storage);
-    if (free_status != cudaSuccess) {
-      throw std::runtime_error(cuda_error(free_status, "cudaFree(d_temp_storage)"));
     }
   }
 }
@@ -162,37 +123,9 @@ inline native64_encode_metadata derive_min_base_bits_metadata(uint64_t const* va
   return metadata;
 }
 
-// TODO(native64/common): consolidate BW helper templates with native64_bw_kernels.inl
-// and move to common.cuh once shared naming is finalized.
-
 // ---------------------------------------------------------------------------
 // Internal BW dispatch helpers
 // ---------------------------------------------------------------------------
-
-
-template <uint8_t BW>
-__host__ __device__ constexpr uint64_t mask_for_bw()
-{
-  if constexpr (BW == 0) {
-    return 0ULL;
-  } else if constexpr (BW >= 64) {
-    return ~uint64_t{0};
-  } else {
-    return (uint64_t{1} << BW) - 1ULL;
-  }
-}
-
-template <uint8_t BW>
-__host__ __device__ constexpr uint32_t words_per_vector_for_bw()
-{
-  return static_cast<uint32_t>(fastlanes::encoded_size_bytes(kVectorSize, BW) / sizeof(uint64_t));
-}
-
-template <uint8_t BW>
-__host__ __device__ constexpr uint32_t words_per_lane_for_bw()
-{
-  return words_per_vector_for_bw<BW>() / kLanesPerVector;
-}
 
 template <uint8_t BW>
 __device__ __forceinline__ void encode_lane_native64(uint64_t const* __restrict vector_in,
@@ -203,8 +136,9 @@ __device__ __forceinline__ void encode_lane_native64(uint64_t const* __restrict 
   if constexpr (BW == 0) {
     return;
   } else {
-    constexpr uint32_t kWordsPerLane = words_per_lane_for_bw<BW>();
-    constexpr uint64_t kMask         = mask_for_bw<BW>();
+    constexpr uint32_t kWordsPerLane =
+      fastlanes::words_per_lane_for_bw<BW>(kVectorSize, kLanesPerVector);
+    constexpr uint64_t kMask = fastlanes::mask_for_bw<BW>();
 
     uint64_t words[kWordsPerLane] = {};
 
@@ -240,7 +174,7 @@ __device__ __forceinline__ void decode_lane_native64(uint64_t const* __restrict 
       vector_out[out_idx] = base_bits;
     }
   } else {
-    constexpr uint64_t kMask = mask_for_bw<BW>();
+    constexpr uint64_t kMask = fastlanes::mask_for_bw<BW>();
 
     for (uint32_t i = 0; i < kValuesPerLane; ++i) {
       auto const out_idx   = i * kLanesPerVector + lane;
@@ -277,7 +211,8 @@ __global__ void encode_native64_kernel(uint64_t const* __restrict values,
   if (vector_start >= padded_count) { return; }
 
   auto const* vector_in = values + vector_start;
-  auto* vector_out      = packed + static_cast<size_t>(vector_id) * words_per_vector_for_bw<BW>();
+  auto* vector_out =
+    packed + static_cast<size_t>(vector_id) * fastlanes::words_per_vector_for_bw<BW>(kVectorSize);
   encode_lane_native64<BW>(vector_in, vector_out, lane, base_bits);
 }
 
@@ -295,7 +230,8 @@ __global__ void decode_native64_kernel(uint64_t const* __restrict packed,
   auto const vector_start = vector_id * kVectorSize;
   if (vector_start >= padded_count) { return; }
 
-  auto const* vector_in = packed + static_cast<size_t>(vector_id) * words_per_vector_for_bw<BW>();
+  auto const* vector_in =
+    packed + static_cast<size_t>(vector_id) * fastlanes::words_per_vector_for_bw<BW>(kVectorSize);
   auto* vector_out      = decoded + vector_start;
   decode_lane_native64<BW>(vector_in, vector_out, lane, base_bits);
 }

@@ -155,6 +155,40 @@ __device__ __host__ inline constexpr size_t encoded_size_bytes(uint64_t count, u
 }
 
 /**
+ * @brief Compute the unsigned bit mask for a given compile-time bitwidth.
+ */
+template <uint8_t BW>
+__device__ __host__ inline constexpr uint64_t mask_for_bw()
+{
+  if constexpr (BW == 0) {
+    return 0ULL;
+  } else if constexpr (BW >= 64) {
+    return ~uint64_t{0};
+  } else {
+    return (uint64_t{1} << BW) - 1ULL;
+  }
+}
+
+/**
+ * @brief Compute encoded 64-bit words per vector for a compile-time bitwidth.
+ */
+template <uint8_t BW>
+__device__ __host__ inline constexpr uint32_t words_per_vector_for_bw(uint32_t vector_size)
+{
+  return static_cast<uint32_t>(encoded_size_bytes(vector_size, BW) / sizeof(uint64_t));
+}
+
+/**
+ * @brief Compute encoded 64-bit words per lane for a compile-time bitwidth.
+ */
+template <uint8_t BW>
+__device__ __host__ inline constexpr uint32_t words_per_lane_for_bw(uint32_t vector_size,
+                                                                     uint32_t lanes_per_vector)
+{
+  return words_per_vector_for_bw<BW>(vector_size) / lanes_per_vector;
+}
+
+/**
  * @brief Get maximum valid bitwidth for a given integer type
  * @tparam T Integer type
  * @return Maximum supported FastLanes bitwidth for this type (capped at 32)

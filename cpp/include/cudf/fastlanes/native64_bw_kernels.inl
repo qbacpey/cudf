@@ -15,7 +15,7 @@ struct bw_row {
   uint8_t crossing_count;
 };
 
-static_assert((1024 % kLanesPerVector) == 0,
+static_assert((kVectorSize % kLanesPerVector) == 0,
               "kLanesPerVector must divide 1024 for launch geometry");
 constexpr uint32_t kThreadsPerBlock = 32;
 static_assert(kThreadsPerBlock >= kLanesPerVector,
@@ -23,31 +23,6 @@ static_assert(kThreadsPerBlock >= kLanesPerVector,
 static_assert((kThreadsPerBlock % kLanesPerVector) == 0,
               "kThreadsPerBlock must be a multiple of kLanesPerVector");
 constexpr uint32_t kVectorsPerBlock = kThreadsPerBlock / kLanesPerVector;
-
-
-template <uint8_t BW>
-__host__ __device__ constexpr uint64_t mask_for_bw()
-{
-  if constexpr (BW == 0) {
-    return 0ULL;
-  } else if constexpr (BW >= 64) {
-    return ~uint64_t{0};
-  } else {
-    return (uint64_t{1} << BW) - 1ULL;
-  }
-}
-
-template <uint8_t BW>
-__host__ __device__ constexpr uint32_t words_per_vector_for_bw()
-{
-  return static_cast<uint32_t>(fastlanes::encoded_size_bytes(kVectorSize, BW) / sizeof(uint64_t));
-}
-
-template <uint8_t BW>
-__host__ __device__ constexpr uint32_t words_per_lane_for_bw()
-{
-  return words_per_vector_for_bw<BW>() / kLanesPerVector;
-}
 
 template <uint8_t BW>
 __device__ __forceinline__ void encode_lane_native64(uint64_t const* __restrict vector_in,
@@ -58,8 +33,9 @@ __device__ __forceinline__ void encode_lane_native64(uint64_t const* __restrict 
   if constexpr (BW == 0) {
     return;
   } else {
-    constexpr uint32_t kWordsPerLane = words_per_lane_for_bw<BW>();
-    constexpr uint64_t kMask         = mask_for_bw<BW>();
+    constexpr uint32_t kWordsPerLane =
+      fastlanes::words_per_lane_for_bw<BW>(kVectorSize, kLanesPerVector);
+    constexpr uint64_t kMask = fastlanes::mask_for_bw<BW>();
 
     uint64_t words[kWordsPerLane] = {};
 
@@ -95,7 +71,7 @@ __device__ __forceinline__ void decode_lane_native64(uint64_t const* __restrict 
       vector_out[out_idx] = base_bits;
     }
   } else {
-    constexpr uint64_t kMask = mask_for_bw<BW>();
+    constexpr uint64_t kMask = fastlanes::mask_for_bw<BW>();
 
     for (uint32_t i = 0; i < kValuesPerLane; ++i) {
       auto const out_idx   = i * kLanesPerVector + lane;
@@ -132,7 +108,8 @@ __global__ void encode_native64_kernel(uint64_t const* __restrict values,
   if (vector_start >= padded_count) { return; }
 
   auto const* vector_in = values + vector_start;
-  auto* vector_out      = packed + static_cast<size_t>(vector_id) * words_per_vector_for_bw<BW>();
+  auto* vector_out =
+    packed + static_cast<size_t>(vector_id) * fastlanes::words_per_vector_for_bw<BW>(kVectorSize);
   encode_lane_native64<BW>(vector_in, vector_out, lane, base_bits);
 }
 
@@ -150,7 +127,8 @@ __global__ void decode_native64_kernel(uint64_t const* __restrict packed,
   auto const vector_start = vector_id * kVectorSize;
   if (vector_start >= padded_count) { return; }
 
-  auto const* vector_in = packed + static_cast<size_t>(vector_id) * words_per_vector_for_bw<BW>();
+  auto const* vector_in =
+    packed + static_cast<size_t>(vector_id) * fastlanes::words_per_vector_for_bw<BW>(kVectorSize);
   auto* vector_out      = decoded + vector_start;
   decode_lane_native64<BW>(vector_in, vector_out, lane, base_bits);
 }

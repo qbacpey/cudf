@@ -12,6 +12,8 @@
 
 #include <cub/cub.cuh>
 #include <cuda_runtime_api.h>
+#include <rmm/cuda_stream_view.hpp>
+#include <rmm/device_buffer.hpp>
 
 #include <algorithm>
 #include <array>
