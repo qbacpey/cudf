@@ -218,5 +218,26 @@ START NOW
 
 MY OBJECTIVE BEGIN
 
+**Task: Remove redundant metadata struct and its related functions**
+In `native64_cuda_kernels.inl`, the `native64_encode_metadata` struct is redundant. Please completely delete:
+1. The `native64_encode_metadata` struct definition.
+2. The `derive_min_base_bits_metadata` function.
+3. The `derive_min_base_bits_metadata_to_device` helper function. 
+4. Any associated "metadata helpers" section comments.
+
+**Task: Reorganize into a proper 3-file architecture (.cuh, .cu, .inl)**
+Currently, the codebase includes the `.inl` file directly, which can cause compile-time and Multiple Definition issues. Please reorganize the `native64` kernel code into a standard 3-file architecture:
+
+1. **Create `cpp/include/cudf/fastlanes/native64_cuda.cuh`:**
+   - This should be a lightweight header file containing ONLY the declarations for the public APIs inside the `native64_generated` namespace. 
+   - Add the signatures for `encode_by_bw_gpu_device_ptrs` and `decode_by_bw_gpu_device_ptrs`.
+
+2. **Create `cpp/src/fastlanes/native64_cuda.cu`:**
+   - This will be the actual compilation target.
+   - It should include the new header (`#include <cudf/fastlanes/native64_cuda.cuh>`) and any required standard/CUDA headers.
+   - At the very bottom of this `.cu` file, include the inline definitions: `#include <cudf/fastlanes/native64_cuda_kernels.inl>`.
+
+3. **Update Callers:**
+   - Find any files (like the test files, e.g., `parquet_fastlanes_native64_generated_test.cu`) that currently `#include "native64_cuda_kernels.inl"` and change them to `#include <cudf/fastlanes/native64_cuda.cuh>` instead.
 
 MY OBJECTIVE END

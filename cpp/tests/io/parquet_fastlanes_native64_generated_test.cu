@@ -8,14 +8,10 @@
 #include <cudf/fastlanes/common.cuh>
 #include <cudf/fastlanes/fls_gen/pack/pack.hpp>
 #include <cudf/fastlanes/fls_gen/unpack/unpack.hpp>
+#include <cudf/fastlanes/native64_cuda.cuh>
 #include <cudf/utilities/default_stream.hpp>
 
 #include <cuda_runtime_api.h>
-#include <rmm/cuda_stream_view.hpp>
-#include <rmm/device_buffer.hpp>
-#include <rmm/exec_policy.hpp>
-#include <thrust/extrema.h>
-#include <thrust/reduce.h>
 
 #include <algorithm>
 #include <array>
@@ -32,6 +28,7 @@ namespace {
 
 class ParquetFastLanesNative64GeneratedTest : public cudf::test::BaseFixture {};
 
+constexpr uint32_t kVectorSize    = static_cast<uint32_t>(fastlanes::VECTOR_SIZE);
 constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ULL;
 constexpr uint64_t kFnvPrime       = 1099511628211ULL;
 
@@ -199,39 +196,25 @@ enum class data_pattern : uint8_t { randomized, adversarial, pathological };
   return oss.str();
 }
 
-#include <cudf/fastlanes/native64_cuda_kernels.inl>
+namespace native64_generated_test {
 
-namespace native64_generated {
-
-struct derived_metadata_result {
-  native64_encode_metadata metadata;
-  uint64_t base_bits_from_device{};
-};
-
-[[nodiscard]] derived_metadata_result derive_metadata_gpu(std::vector<uint64_t> const& values,
-                                                          uint32_t total_count)
+[[nodiscard]] uint64_t derive_min_base_bits_gpu(std::vector<uint64_t> const& values,
+                                                uint32_t total_count)
 {
   auto const stream       = cudf::get_default_stream();
   auto const padded_count = static_cast<uint32_t>(fastlanes::padded_count(total_count));
 
   if (values.size() != padded_count) {
-    throw std::invalid_argument("derive_metadata_gpu values size mismatch");
+    throw std::invalid_argument("derive_min_base_bits_gpu values size mismatch");
   }
 
-  uint64_t* d_values    = nullptr;
-  uint64_t* d_base_bits = nullptr;
+  uint64_t* d_values = nullptr;
 
   auto cleanup = [&]() {
     if (d_values != nullptr) { cudaFree(d_values); }
-    if (d_base_bits != nullptr) { cudaFree(d_base_bits); }
   };
 
   auto const values_bytes = values.size() * sizeof(uint64_t);
-
-  auto const malloc_base_status = cudaMalloc(reinterpret_cast<void**>(&d_base_bits), sizeof(uint64_t));
-  if (malloc_base_status != cudaSuccess) {
-    throw std::runtime_error(cuda_error(malloc_base_status, "cudaMalloc(d_base_bits)"));
-  }
 
   if (values_bytes > 0) {
     auto const malloc_values_status = cudaMalloc(reinterpret_cast<void**>(&d_values), values_bytes);
@@ -248,17 +231,8 @@ struct derived_metadata_result {
     }
   }
 
-  native64_encode_metadata metadata{};
-  derive_min_base_bits_metadata_to_device(
-    d_values, total_count, d_base_bits, stream.value(), &metadata.base_bits);
-
-  uint64_t base_bits_from_device{};
-  auto const d2h_status = cudaMemcpyAsync(
-    &base_bits_from_device, d_base_bits, sizeof(uint64_t), cudaMemcpyDeviceToHost, stream.value());
-  if (d2h_status != cudaSuccess) {
-    cleanup();
-    throw std::runtime_error(cuda_error(d2h_status, "cudaMemcpy D2H base_bits"));
-  }
+  auto const min_base_bits =
+    ::native64_generated::derive_min_base_bits(d_values, total_count, stream.value());
 
   auto const sync_status = cudaStreamSynchronize(stream.value());
   if (sync_status != cudaSuccess) {
@@ -267,7 +241,7 @@ struct derived_metadata_result {
   }
 
   cleanup();
-  return {metadata, base_bits_from_device};
+  return min_base_bits;
 }
 
 [[nodiscard]] std::vector<uint64_t> encode_by_bw_gpu(uint8_t bw,
@@ -334,7 +308,7 @@ struct derived_metadata_result {
     }
   }
 
-  encode_by_bw_gpu_device_ptrs(
+  ::native64_generated::encode_by_bw_gpu_device_ptrs(
     bw, d_values, d_packed, base_bits, total_count, stream.value());
 
   auto const sync_status = cudaStreamSynchronize(stream.value());
@@ -437,7 +411,7 @@ struct derived_metadata_result {
     }
   }
 
-  decode_by_bw_gpu_device_ptrs(
+  ::native64_generated::decode_by_bw_gpu_device_ptrs(
     bw, d_packed, d_decoded, base_bits, total_count, stream.value());
 
   auto const sync_status = cudaStreamSynchronize(stream.value());
@@ -468,7 +442,7 @@ struct derived_metadata_result {
   return out_host;
 }
 
-}  // namespace native64_generated
+}  // namespace native64_generated_test
 
 struct min_oracle {
   uint64_t base_bits{};
@@ -535,13 +509,14 @@ struct parity_evidence {
   auto const values = add_base_to_deltas(deltas, base_bits);
 
   auto const cpu_packed = pack_bw_vectors_cpu(deltas, bw);
-  auto const gpu_packed = native64_generated::encode_by_bw_gpu(bw, values, base_bits, total_count);
+  auto const gpu_packed =
+    native64_generated_test::encode_by_bw_gpu(bw, values, base_bits, total_count);
 
   auto const cpu_unpacked      = unpack_bw_vectors_cpu(cpu_packed, deltas.size(), bw);
   auto const gpu_decode_cpu_pk =
-    native64_generated::decode_by_bw_gpu(bw, cpu_packed, base_bits, total_count);
+    native64_generated_test::decode_by_bw_gpu(bw, cpu_packed, base_bits, total_count);
   auto const gpu_roundtrip =
-    native64_generated::decode_by_bw_gpu(bw, gpu_packed, base_bits, total_count);
+    native64_generated_test::decode_by_bw_gpu(bw, gpu_packed, base_bits, total_count);
 
   auto evidence = parity_evidence{.cpu_packed_checksum = checksum_words(cpu_packed),
                                   .gpu_packed_checksum = checksum_words(gpu_packed)};
@@ -676,15 +651,9 @@ TEST_F(ParquetFastLanesNative64GeneratedTest, MetadataMinReductionMatchesCpuOrac
           auto const values = add_base_to_deltas(deltas, base);
 
           auto const expected = derive_min_cpu(values, count);
-          auto const actual   = native64_generated::derive_metadata_gpu(values, count);
+          auto const actual   = native64_generated_test::derive_min_base_bits_gpu(values, count);
 
-          EXPECT_EQ(actual.metadata.base_bits, expected.base_bits)
-            << "bw=" << static_cast<int>(bw) << " count=" << count
-            << " pattern=" << pattern_name(pattern);
-          EXPECT_EQ(actual.base_bits_from_device, expected.base_bits)
-            << "bw=" << static_cast<int>(bw) << " count=" << count
-            << " pattern=" << pattern_name(pattern);
-          EXPECT_EQ(actual.metadata.base_bits, actual.base_bits_from_device)
+          EXPECT_EQ(actual, expected.base_bits)
             << "bw=" << static_cast<int>(bw) << " count=" << count
             << " pattern=" << pattern_name(pattern);
         }
@@ -713,25 +682,22 @@ TEST_F(ParquetFastLanesNative64GeneratedTest, DerivedMinEncodeMatchesExplicitPat
 
           auto const expected_min = derive_min_cpu(values, count);
           auto const explicit_bw = derive_bitwidth_cpu(values, count, expected_min.base_bits);
-          auto const explicit_packed = native64_generated::encode_by_bw_gpu(
+          auto const explicit_packed = native64_generated_test::encode_by_bw_gpu(
             explicit_bw, values, expected_min.base_bits, count);
-          auto const derived_min = native64_generated::derive_metadata_gpu(values, count);
+          auto const derived_min = native64_generated_test::derive_min_base_bits_gpu(values, count);
 
-          EXPECT_EQ(derived_min.metadata.base_bits, expected_min.base_bits)
-            << "bw=" << static_cast<int>(bw) << " count=" << count
-            << " pattern=" << pattern_name(pattern);
-          EXPECT_EQ(derived_min.base_bits_from_device, expected_min.base_bits)
+          EXPECT_EQ(derived_min, expected_min.base_bits)
             << "bw=" << static_cast<int>(bw) << " count=" << count
             << " pattern=" << pattern_name(pattern);
 
-          auto const derived_min_packed = native64_generated::encode_by_bw_gpu(
-            explicit_bw, values, derived_min.metadata.base_bits, count);
+          auto const derived_min_packed = native64_generated_test::encode_by_bw_gpu(
+            explicit_bw, values, derived_min, count);
           EXPECT_EQ(derived_min_packed, explicit_packed)
             << "bw=" << static_cast<int>(bw) << " count=" << count
             << " pattern=" << pattern_name(pattern);
 
-          auto const decoded = native64_generated::decode_by_bw_gpu(
-            explicit_bw, derived_min_packed, derived_min.metadata.base_bits, count);
+          auto const decoded = native64_generated_test::decode_by_bw_gpu(
+            explicit_bw, derived_min_packed, derived_min, count);
           for (uint32_t i = 0; i < count; ++i) {
             EXPECT_EQ(decoded[i], values[i])
               << "bw=" << static_cast<int>(bw) << " count=" << count

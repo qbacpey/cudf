@@ -7,13 +7,6 @@
 
 namespace native64_generated {
 
-struct bw_row {
-  uint8_t bw;
-  uint32_t words_per_lane;
-  uint32_t words_per_vector;
-  uint8_t crossing_count;
-};
-
 constexpr uint32_t kVectorSize     = 1024;
 constexpr uint32_t kLanesPerVector = 16;
 constexpr uint32_t kValuesPerLane  = kVectorSize / kLanesPerVector;
@@ -28,86 +21,8 @@ static_assert(kThreadsPerBlock >= kLanesPerVector,
 static_assert((kThreadsPerBlock % kLanesPerVector) == 0,
               "kThreadsPerBlock must be a multiple of kLanesPerVector");
 
-struct native64_encode_metadata {
-  uint64_t base_bits{};
-};
-
 // ---------------------------------------------------------------------------
-// Public metadata APIs (min-only Commit 3 stage)
-// ---------------------------------------------------------------------------
-
-// Stage-1 metadata reduction for Commit 3. This operates on the unpadded logical range.
-// Caller owns `d_base_bits`.
-inline void derive_min_base_bits_metadata_to_device(uint64_t const* values,
-                                                    uint32_t total_count,
-                                                    uint64_t* d_base_bits,
-                                                    cudaStream_t stream,
-                                                    uint64_t* h_base_bits_out = nullptr)
-{
-  if (d_base_bits == nullptr) {
-    throw std::invalid_argument("derive_min_base_bits_metadata_to_device requires non-null d_base_bits");
-  }
-
-  if (total_count == 0) {
-    auto const zero       = uint64_t{0};
-    auto const init_status =
-      cudaMemcpyAsync(d_base_bits, &zero, sizeof(uint64_t), cudaMemcpyHostToDevice, stream);
-    if (init_status != cudaSuccess) {
-      throw std::runtime_error(cuda_error(init_status, "cudaMemcpyAsync init base_bits for empty input"));
-    }
-    if (h_base_bits_out != nullptr) { *h_base_bits_out = zero; }
-    return;
-  }
-
-  if (values == nullptr) {
-    throw std::invalid_argument(
-      "derive_min_base_bits_metadata_to_device requires non-null values when total_count > 0");
-  }
-
-  auto const min_val = thrust::reduce(rmm::exec_policy(stream),
-                                      values,
-                                      values + total_count,
-                                      std::numeric_limits<uint64_t>::max(),
-                                      thrust::minimum<uint64_t>());
-
-  auto const copy_status =
-    cudaMemcpyAsync(d_base_bits, &min_val, sizeof(uint64_t), cudaMemcpyHostToDevice, stream);
-  if (copy_status != cudaSuccess) {
-    throw std::runtime_error(cuda_error(copy_status, "cudaMemcpyAsync base_bits H2D"));
-  }
-
-  if (h_base_bits_out != nullptr) {
-    *h_base_bits_out = min_val;
-  }
-}
-
-inline native64_encode_metadata derive_min_base_bits_metadata(uint64_t const* values,
-                                                              uint32_t total_count,
-                                                              cudaStream_t stream)
-{
-  if (total_count == 0) { return native64_encode_metadata{}; }
-  if (values == nullptr) {
-    throw std::invalid_argument(
-      "derive_min_base_bits_metadata requires non-null values when total_count > 0");
-  }
-
-  auto const stream_view = rmm::cuda_stream_view{stream};
-  auto d_base_bits       = rmm::device_buffer(sizeof(uint64_t), stream_view);
-
-  native64_encode_metadata metadata{};
-  derive_min_base_bits_metadata_to_device(
-    values, total_count, static_cast<uint64_t*>(d_base_bits.data()), stream, &metadata.base_bits);
-
-  auto const sync_status = cudaStreamSynchronize(stream);
-  if (sync_status != cudaSuccess) {
-    throw std::runtime_error(cuda_error(sync_status, "cudaStreamSynchronize metadata reduction"));
-  }
-
-  return metadata;
-}
-
-// ---------------------------------------------------------------------------
-// Internal BW dispatch helpers
+// Internal encode/decode runtime helpers
 // ---------------------------------------------------------------------------
 
 template <uint8_t BW>
@@ -386,36 +301,7 @@ inline constexpr std::array<decode_device_ptr_dispatch_fn, 65> kDecodeDevicePtrD
 #undef DECODE_DISPATCH_ENTRY
 }};
 
-// ---------------------------------------------------------------------------
-// Public encode/decode runtime APIs (device pointer entrypoints)
-// ---------------------------------------------------------------------------
-
-inline void encode_by_bw_gpu_device_ptrs(uint8_t bw,
-                                         uint64_t const* values,
-                                         uint64_t* packed,
-                                         uint64_t base_bits,
-                                         uint32_t total_count,
-                                         cudaStream_t stream)
-{
-  if (bw > 64) {
-    throw std::invalid_argument("encode_by_bw_gpu_device_ptrs requires bw in [0,64]");
-  }
-  kEncodeDevicePtrDispatch[bw](values, packed, base_bits, total_count, stream);
-}
-
-inline void decode_by_bw_gpu_device_ptrs(uint8_t bw,
-                                         uint64_t const* packed,
-                                         uint64_t* decoded,
-                                         uint64_t base_bits,
-                                         uint32_t total_count,
-                                         cudaStream_t stream)
-{
-  if (bw > 64) {
-    throw std::invalid_argument("decode_by_bw_gpu_device_ptrs requires bw in [0,64]");
-  }
-  kDecodeDevicePtrDispatch[bw](packed, decoded, base_bits, total_count, stream);
-}
-
 #undef NATIVE64_FOR_EACH_BW
+
 
 }  // namespace native64_generated
