@@ -10,6 +10,7 @@
 #include <cudf/fastlanes/fls_gen/unpack/unpack.hpp>
 #include <cudf/utilities/default_stream.hpp>
 
+#include <cub/cub.cuh>
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
@@ -194,6 +195,73 @@ enum class data_pattern : uint8_t { randomized, adversarial, pathological };
 #include <cudf/fastlanes/native64_cuda_kernels.inl>
 
 namespace native64_generated {
+
+struct derived_metadata_result {
+  native64_encode_metadata metadata;
+  uint64_t base_bits_from_device{};
+};
+
+[[nodiscard]] derived_metadata_result derive_metadata_gpu(std::vector<uint64_t> const& values,
+                                                          uint32_t total_count)
+{
+  auto const stream       = cudf::get_default_stream();
+  auto const padded_count = static_cast<uint32_t>(fastlanes::padded_count(total_count));
+
+  if (values.size() != padded_count) {
+    throw std::invalid_argument("derive_metadata_gpu values size mismatch");
+  }
+
+  uint64_t* d_values    = nullptr;
+  uint64_t* d_base_bits = nullptr;
+
+  auto cleanup = [&]() {
+    if (d_values != nullptr) { cudaFree(d_values); }
+    if (d_base_bits != nullptr) { cudaFree(d_base_bits); }
+  };
+
+  auto const values_bytes = values.size() * sizeof(uint64_t);
+
+  auto const malloc_base_status = cudaMalloc(reinterpret_cast<void**>(&d_base_bits), sizeof(uint64_t));
+  if (malloc_base_status != cudaSuccess) {
+    throw std::runtime_error(cuda_error(malloc_base_status, "cudaMalloc(d_base_bits)"));
+  }
+
+  if (values_bytes > 0) {
+    auto const malloc_values_status = cudaMalloc(reinterpret_cast<void**>(&d_values), values_bytes);
+    if (malloc_values_status != cudaSuccess) {
+      cleanup();
+      throw std::runtime_error(cuda_error(malloc_values_status, "cudaMalloc(d_values)"));
+    }
+
+    auto const h2d_status = cudaMemcpyAsync(
+      d_values, values.data(), values_bytes, cudaMemcpyHostToDevice, stream.value());
+    if (h2d_status != cudaSuccess) {
+      cleanup();
+      throw std::runtime_error(cuda_error(h2d_status, "cudaMemcpy H2D values"));
+    }
+  }
+
+  native64_encode_metadata metadata{};
+  derive_min_base_bits_metadata_to_device(
+    d_values, total_count, d_base_bits, stream.value(), &metadata.base_bits);
+
+  uint64_t base_bits_from_device{};
+  auto const d2h_status = cudaMemcpyAsync(
+    &base_bits_from_device, d_base_bits, sizeof(uint64_t), cudaMemcpyDeviceToHost, stream.value());
+  if (d2h_status != cudaSuccess) {
+    cleanup();
+    throw std::runtime_error(cuda_error(d2h_status, "cudaMemcpy D2H base_bits"));
+  }
+
+  auto const sync_status = cudaStreamSynchronize(stream.value());
+  if (sync_status != cudaSuccess) {
+    cleanup();
+    throw std::runtime_error(cuda_error(sync_status, "cudaStreamSynchronize"));
+  }
+
+  cleanup();
+  return {metadata, base_bits_from_device};
+}
 
 [[nodiscard]] std::vector<uint64_t> encode_by_bw_gpu(uint8_t bw,
                                                      std::vector<uint64_t> const& values,
@@ -395,6 +463,50 @@ namespace native64_generated {
 
 }  // namespace native64_generated
 
+struct min_oracle {
+  uint64_t base_bits{};
+};
+
+[[nodiscard]] uint8_t bitwidth_from_max_delta_cpu(uint64_t max_delta)
+{
+  if (max_delta == 0ULL) { return 0; }
+
+  uint8_t bits = 0;
+  while (max_delta > 0ULL) {
+    max_delta >>= 1;
+    ++bits;
+  }
+  return bits;
+}
+
+[[nodiscard]] min_oracle derive_min_cpu(std::vector<uint64_t> const& values, uint32_t total_count)
+{
+  if (total_count == 0) { return min_oracle{}; }
+  if (values.size() < total_count) {
+    throw std::invalid_argument("derive_min_cpu values size mismatch");
+  }
+
+  auto const base = *std::min_element(values.begin(), values.begin() + total_count);
+  return min_oracle{base};
+}
+
+[[nodiscard]] uint8_t derive_bitwidth_cpu(std::vector<uint64_t> const& values,
+                                          uint32_t total_count,
+                                          uint64_t base_bits)
+{
+  if (total_count == 0) { return 0; }
+  if (values.size() < total_count) {
+    throw std::invalid_argument("derive_bitwidth_cpu values size mismatch");
+  }
+
+  uint64_t max_delta{0};
+  for (uint32_t i = 0; i < total_count; ++i) {
+    max_delta = std::max(max_delta, values[i] - base_bits);
+  }
+
+  return bitwidth_from_max_delta_cpu(max_delta);
+}
+
 struct parity_evidence {
   size_t cpu_roundtrip_mismatch{};
   size_t gpu_pack_mismatch{};
@@ -536,6 +648,92 @@ TEST_F(ParquetFastLanesNative64GeneratedTest, FullSweepParityMatrix)
   }
 
   // std::cout << report.str() << std::endl;
+}
+
+TEST_F(ParquetFastLanesNative64GeneratedTest, MetadataMinReductionMatchesCpuOracle)
+{
+  std::array<uint8_t, 7> constexpr selected_bw = {0, 1, 17, 33, 37, 63, 64};
+  std::array<uint32_t, 4> constexpr counts = {1, 1025, 2047, 2049};
+  std::array<data_pattern, 3> constexpr patterns = {
+    data_pattern::randomized, data_pattern::adversarial, data_pattern::pathological};
+
+  for (auto const bw : selected_bw) {
+    auto const bases = base_set_for_bw(bw);
+
+    for (auto const count : counts) {
+      for (auto const pattern : patterns) {
+        for (auto const base : bases) {
+          auto const seed = 0x9c6f5d3b17e4a221ULL + static_cast<uint64_t>(count) * 131ULL +
+                            static_cast<uint64_t>(bw) * 17ULL;
+          auto const deltas = make_padded_deltas(count, seed, bw, pattern);
+          auto const values = add_base_to_deltas(deltas, base);
+
+          auto const expected = derive_min_cpu(values, count);
+          auto const actual   = native64_generated::derive_metadata_gpu(values, count);
+
+          EXPECT_EQ(actual.metadata.base_bits, expected.base_bits)
+            << "bw=" << static_cast<int>(bw) << " count=" << count
+            << " pattern=" << pattern_name(pattern);
+          EXPECT_EQ(actual.base_bits_from_device, expected.base_bits)
+            << "bw=" << static_cast<int>(bw) << " count=" << count
+            << " pattern=" << pattern_name(pattern);
+          EXPECT_EQ(actual.metadata.base_bits, actual.base_bits_from_device)
+            << "bw=" << static_cast<int>(bw) << " count=" << count
+            << " pattern=" << pattern_name(pattern);
+        }
+      }
+    }
+  }
+}
+
+TEST_F(ParquetFastLanesNative64GeneratedTest, DerivedMinEncodeMatchesExplicitPath)
+{
+  std::array<uint8_t, 5> constexpr selected_bw = {0, 1, 33, 37, 64};
+  std::array<uint32_t, 3> constexpr counts = {1023, 1025, 2049};
+  std::array<data_pattern, 2> constexpr patterns = {
+    data_pattern::randomized, data_pattern::adversarial};
+
+  for (auto const bw : selected_bw) {
+    auto const bases = base_set_for_bw(bw);
+
+    for (auto const count : counts) {
+      for (auto const pattern : patterns) {
+        for (auto const base : bases) {
+          auto const seed = 0x5f2c19d4e301a77bULL + static_cast<uint64_t>(count) * 97ULL +
+                            static_cast<uint64_t>(bw) * 31ULL;
+          auto const deltas = make_padded_deltas(count, seed, bw, pattern);
+          auto const values = add_base_to_deltas(deltas, base);
+
+          auto const expected_min = derive_min_cpu(values, count);
+          auto const explicit_bw = derive_bitwidth_cpu(values, count, expected_min.base_bits);
+          auto const explicit_packed = native64_generated::encode_by_bw_gpu(
+            explicit_bw, values, expected_min.base_bits, count);
+          auto const derived_min = native64_generated::derive_metadata_gpu(values, count);
+
+          EXPECT_EQ(derived_min.metadata.base_bits, expected_min.base_bits)
+            << "bw=" << static_cast<int>(bw) << " count=" << count
+            << " pattern=" << pattern_name(pattern);
+          EXPECT_EQ(derived_min.base_bits_from_device, expected_min.base_bits)
+            << "bw=" << static_cast<int>(bw) << " count=" << count
+            << " pattern=" << pattern_name(pattern);
+
+          auto const derived_min_packed = native64_generated::encode_by_bw_gpu(
+            explicit_bw, values, derived_min.metadata.base_bits, count);
+          EXPECT_EQ(derived_min_packed, explicit_packed)
+            << "bw=" << static_cast<int>(bw) << " count=" << count
+            << " pattern=" << pattern_name(pattern);
+
+          auto const decoded = native64_generated::decode_by_bw_gpu(
+            explicit_bw, derived_min_packed, derived_min.metadata.base_bits, count);
+          for (uint32_t i = 0; i < count; ++i) {
+            EXPECT_EQ(decoded[i], values[i])
+              << "bw=" << static_cast<int>(bw) << " count=" << count
+              << " pattern=" << pattern_name(pattern) << " index=" << i;
+          }
+        }
+      }
+    }
+  }
 }
 
 TEST_F(ParquetFastLanesNative64GeneratedTest, StabilityRepeatsSelectedSeeds)

@@ -24,6 +24,151 @@ static_assert((kThreadsPerBlock % kLanesPerVector) == 0,
               "kThreadsPerBlock must be a multiple of kLanesPerVector");
 constexpr uint32_t kVectorsPerBlock = kThreadsPerBlock / kLanesPerVector;
 
+struct native64_encode_metadata {
+  uint64_t base_bits{};
+};
+
+// ---------------------------------------------------------------------------
+// Metadata reduction helpers (internal)
+// ---------------------------------------------------------------------------
+namespace detail {
+
+[[nodiscard]] inline size_t query_min_reduce_temp_storage_bytes_u64(uint64_t const* values,
+                                                                    uint64_t* d_base_bits,
+                                                                    uint32_t total_count,
+                                                                    cudaStream_t stream)
+{
+  if (total_count == 0) { return 0; }
+  if (values == nullptr) {
+    throw std::invalid_argument(
+      "query_min_reduce_temp_storage_bytes_u64 requires non-null values when total_count > 0");
+  }
+  if (d_base_bits == nullptr) {
+    throw std::invalid_argument(
+      "query_min_reduce_temp_storage_bytes_u64 requires non-null d_base_bits");
+  }
+
+  size_t temp_storage_bytes = 0;
+  auto const query_status = cub::DeviceReduce::Min(
+    nullptr, temp_storage_bytes, values, d_base_bits, total_count, stream);
+  if (query_status != cudaSuccess) {
+    throw std::runtime_error(
+      cuda_error(query_status, "cub::DeviceReduce::Min temp storage query"));
+  }
+  return temp_storage_bytes;
+}
+
+}  // namespace detail
+
+// ---------------------------------------------------------------------------
+// Public metadata APIs (min-only Commit 3 stage)
+// ---------------------------------------------------------------------------
+
+// Stage-1 metadata reduction for Commit 3. This operates on the unpadded logical range.
+// Caller owns `d_base_bits`; temporary CUB storage is managed internally.
+inline void derive_min_base_bits_metadata_to_device(uint64_t const* values,
+                                                    uint32_t total_count,
+                                                    uint64_t* d_base_bits,
+                                                    cudaStream_t stream,
+                                                    uint64_t* h_base_bits_out = nullptr)
+{
+  if (d_base_bits == nullptr) {
+    throw std::invalid_argument("derive_min_base_bits_metadata_to_device requires non-null d_base_bits");
+  }
+
+  if (total_count == 0) {
+    auto const zero       = uint64_t{0};
+    auto const init_status =
+      cudaMemcpyAsync(d_base_bits, &zero, sizeof(uint64_t), cudaMemcpyHostToDevice, stream);
+    if (init_status != cudaSuccess) {
+      throw std::runtime_error(cuda_error(init_status, "cudaMemcpyAsync init base_bits for empty input"));
+    }
+    if (h_base_bits_out != nullptr) { *h_base_bits_out = zero; }
+    return;
+  }
+
+  if (values == nullptr) {
+    throw std::invalid_argument(
+      "derive_min_base_bits_metadata_to_device requires non-null values when total_count > 0");
+  }
+
+  void* d_temp_storage = nullptr;
+  auto const temp_storage_bytes =
+    detail::query_min_reduce_temp_storage_bytes_u64(values, d_base_bits, total_count, stream);
+  if (temp_storage_bytes > 0) {
+    auto const malloc_temp_status = cudaMalloc(&d_temp_storage, temp_storage_bytes);
+    if (malloc_temp_status != cudaSuccess) {
+      throw std::runtime_error(cuda_error(malloc_temp_status, "cudaMalloc(d_temp_storage)"));
+    }
+  }
+
+  auto cub_temp_storage_bytes = temp_storage_bytes;
+  auto const reduce_status = cub::DeviceReduce::Min(
+    d_temp_storage, cub_temp_storage_bytes, values, d_base_bits, total_count, stream);
+  if (reduce_status != cudaSuccess) {
+    if (d_temp_storage != nullptr) { cudaFree(d_temp_storage); }
+    throw std::runtime_error(cuda_error(reduce_status, "cub::DeviceReduce::Min"));
+  }
+
+  if (h_base_bits_out != nullptr) {
+    auto const copy_status = cudaMemcpyAsync(
+      h_base_bits_out, d_base_bits, sizeof(uint64_t), cudaMemcpyDeviceToHost, stream);
+    if (copy_status != cudaSuccess) {
+      if (d_temp_storage != nullptr) { cudaFree(d_temp_storage); }
+      throw std::runtime_error(cuda_error(copy_status, "cudaMemcpyAsync base_bits D2H"));
+    }
+  }
+
+  if (d_temp_storage != nullptr) {
+    auto const free_status = cudaFree(d_temp_storage);
+    if (free_status != cudaSuccess) {
+      throw std::runtime_error(cuda_error(free_status, "cudaFree(d_temp_storage)"));
+    }
+  }
+}
+
+inline native64_encode_metadata derive_min_base_bits_metadata(uint64_t const* values,
+                                                              uint32_t total_count,
+                                                              cudaStream_t stream)
+{
+  if (total_count == 0) { return native64_encode_metadata{}; }
+  if (values == nullptr) {
+    throw std::invalid_argument(
+      "derive_min_base_bits_metadata requires non-null values when total_count > 0");
+  }
+
+  uint64_t* d_base_bits = nullptr;
+
+  auto cleanup = [&]() {
+    if (d_base_bits != nullptr) { cudaFree(d_base_bits); }
+  };
+
+  auto const malloc_base_status = cudaMalloc(reinterpret_cast<void**>(&d_base_bits), sizeof(uint64_t));
+  if (malloc_base_status != cudaSuccess) {
+    throw std::runtime_error(cuda_error(malloc_base_status, "cudaMalloc(d_base_bits)"));
+  }
+
+  native64_encode_metadata metadata{};
+  derive_min_base_bits_metadata_to_device(
+    values, total_count, d_base_bits, stream, &metadata.base_bits);
+
+  auto const sync_status = cudaStreamSynchronize(stream);
+  if (sync_status != cudaSuccess) {
+    cleanup();
+    throw std::runtime_error(cuda_error(sync_status, "cudaStreamSynchronize metadata reduction"));
+  }
+
+  cleanup();
+  return metadata;
+}
+
+// TODO(native64/common): consolidate BW helper templates with native64_bw_kernels.inl
+// and move to common.cuh once shared naming is finalized.
+
+// ---------------------------------------------------------------------------
+// Internal BW dispatch helpers
+// ---------------------------------------------------------------------------
+
 
 template <uint8_t BW>
 __host__ __device__ constexpr uint64_t mask_for_bw()
@@ -322,6 +467,10 @@ inline constexpr std::array<decode_device_ptr_dispatch_fn, 65> kDecodeDevicePtrD
 #undef DECODE_DISPATCH_ENTRY
 }};
 
+// ---------------------------------------------------------------------------
+// Public encode/decode runtime APIs (device pointer entrypoints)
+// ---------------------------------------------------------------------------
+
 inline void encode_by_bw_gpu_device_ptrs(uint8_t bw,
                                          uint64_t const* values,
                                          uint64_t* packed,
@@ -346,27 +495,6 @@ inline void decode_by_bw_gpu_device_ptrs(uint8_t bw,
     throw std::invalid_argument("decode_by_bw_gpu_device_ptrs requires bw in [0,64]");
   }
   kDecodeDevicePtrDispatch[bw](packed, decoded, base_bits, total_count, stream);
-}
-
-// Backward-compatible aliases. Inputs/outputs still must be CUDA device pointers.
-inline void encode_by_bw_gpu(uint8_t bw,
-                             uint64_t const* values,
-                             uint64_t* packed,
-                             uint64_t base_bits,
-                             uint32_t total_count,
-                             cudaStream_t stream)
-{
-  encode_by_bw_gpu_device_ptrs(bw, values, packed, base_bits, total_count, stream);
-}
-
-inline void decode_by_bw_gpu(uint8_t bw,
-                             uint64_t const* packed,
-                             uint64_t* decoded,
-                             uint64_t base_bits,
-                             uint32_t total_count,
-                             cudaStream_t stream)
-{
-  decode_by_bw_gpu_device_ptrs(bw, packed, decoded, base_bits, total_count, stream);
 }
 
 #undef NATIVE64_FOR_EACH_BW
