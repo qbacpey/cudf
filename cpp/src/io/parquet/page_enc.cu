@@ -42,6 +42,7 @@
 #include <thrust/scatter.h>
 
 #include <bitset>
+#include <memory>
 #include <unordered_map>
 
 namespace cudf::io::parquet::detail {
@@ -3820,6 +3821,344 @@ void InitEncoderPages(device_2dspan<EncColumnChunk> chunks,
                                                                    write_v2_headers);
 }
 
+namespace {
+
+struct fastlanes_cpu_upload_buffers {
+  explicit fastlanes_cpu_upload_buffers(size_t num_pages)
+    : host_upload_ptrs(num_pages, nullptr), host_upload_sizes(num_pages, 0)
+  {
+    encoded_buffers.reserve(num_pages);
+  }
+
+  std::vector<rmm::device_buffer> encoded_buffers;
+  std::vector<uint8_t*> host_upload_ptrs;
+  std::vector<uint32_t> host_upload_sizes;
+};
+
+std::vector<EncPage> copy_fastlanes_pages_to_host(device_span<EncPage> pages,
+                                                  rmm::cuda_stream_view stream)
+{
+  std::vector<EncPage> host_pages(pages.size());
+  cudaMemcpyAsync(host_pages.data(),
+                  pages.data(),
+                  pages.size_bytes(),
+                  cudaMemcpyDeviceToHost,
+                  stream.value());
+  cudaStreamSynchronize(stream.value());
+  return host_pages;
+}
+
+fastlanes_page_type_info gather_fastlanes_page_type_info(device_span<EncPage> pages,
+                                                         size_t page_idx,
+                                                         rmm::cuda_stream_view stream)
+{
+  rmm::device_scalar<fastlanes_page_type_info> d_type_info(fastlanes_page_type_info{}, stream);
+  gpuGatherSinglePageTyped<int32_t, encode_block_size>
+    <<<1, encode_block_size, 0, stream.value()>>>(pages, page_idx, nullptr, d_type_info.data());
+  return d_type_info.value(stream);
+}
+
+void maybe_log_fastlanes_host_page_meta(EncPage const& page, size_t page_idx, uint32_t chunk_page_index)
+{
+  if (!fastlanes::debug::is_header_enabled()) { return; }
+  std::cout << "[FL HOST META ] page=" << page_idx << " chunk=" << page.chunk_id
+            << " chunk_page=" << chunk_page_index << " start_row=" << page.start_row
+            << " num_rows=" << page.num_rows << " num_leaf=" << page.num_leaf_values
+            << " max_data_size=" << page.max_data_size << "\n";
+}
+
+void maybe_log_fastlanes_int32_vector_boundaries(rmm::device_uvector<uint32_t> const& gather_buffer,
+                                                 uint32_t num_values,
+                                                 size_t page_idx,
+                                                 rmm::cuda_stream_view stream)
+{
+  if (!fastlanes::debug::is_vector_boundary_enabled()) { return; }
+
+  auto print_u32_at = [&](uint32_t idx, char const* tag) {
+    if (idx >= num_values) return;
+    uint32_t v{};
+    cudaMemcpyAsync(
+      &v, gather_buffer.data() + idx, sizeof(uint32_t), cudaMemcpyDeviceToHost, stream.value());
+    cudaStreamSynchronize(stream.value());
+    std::cout << "[FL GATHER   ] page=" << page_idx << " " << tag << " idx=" << idx
+              << " val=0x" << std::hex << v << std::dec << "\n";
+  };
+
+  print_u32_at(0, "head");
+  print_u32_at(1, "head");
+  if (num_values > 1023) { print_u32_at(1023, "boundary"); }
+  if (num_values > 1024) { print_u32_at(1024, "boundary"); }
+}
+
+template <typename HeaderT>
+void validate_fastlanes_pre_delta_policy(encode_kernel_mask kernel_mask, HeaderT const& hdr)
+{
+  auto const split64_mode =
+    fastlanes_encoding_for_mask(kernel_mask) == Encoding::FASTLANE_BITPACK_SPLIT64;
+  if (!fastlanes::is_pre_delta_valid_for_mode(split64_mode, hdr.pre_delta)) {
+    throw std::invalid_argument("FastLanes: invalid PRE_DELTA policy for selected page encoding mode");
+  }
+}
+
+template <typename HeaderT>
+void maybe_log_fastlanes_encoded_scalar32(size_t page_idx,
+                                          uint32_t chunk_id,
+                                          uint32_t chunk_page_index,
+                                          bool split64_mode,
+                                          HeaderT const& hdr,
+                                          fastlanes_cudf::EncodedPageResult const& result)
+{
+  if (!fastlanes::debug::is_workload_enabled()) { return; }
+
+  auto const* payload_u32 = reinterpret_cast<uint32_t const*>(
+    fastlanes::PageHeader::payload_ptr(result.host_blob.data()));
+  auto const page_mode_name = split64_mode ? "SPLIT64" : "RAW";
+  std::cout << "[FL ENCODED  ] page=" << page_idx << " chunk=" << chunk_id
+            << " chunk_page=" << chunk_page_index << " mode=" << page_mode_name
+            << " pre_delta=" << (hdr.pre_delta ? "true" : "false")
+            << " cast=" << fastlanes::debug::cast_mode_str(result.cast_mode)
+            << " hdr=" << fastlanes::PageHeader::header_size()
+            << " bw=" << static_cast<int>(hdr.component_bitwidth_low)
+            << " orig=" << hdr.original_count << " pad=" << hdr.padded_count
+            << " body=" << hdr.body_size << " min=0x" << std::hex << hdr.min_value_bits() << std::dec
+            << " blob=" << result.total_size() << "\n";
+  if (hdr.body_size >= sizeof(uint32_t)) {
+    std::cout << "[FL PAYLOAD  ] page=" << page_idx << " payload[0]=0x" << std::hex
+              << payload_u32[0] << std::dec << "\n";
+  }
+}
+
+template <typename HeaderT>
+void maybe_log_fastlanes_encoded_split32(size_t page_idx,
+                                         uint32_t chunk_id,
+                                         uint32_t chunk_page_index,
+                                         bool split64_mode,
+                                         HeaderT const& hdr,
+                                         fastlanes_cudf::EncodedPageResult const& result)
+{
+  if (!fastlanes::debug::is_workload_enabled()) { return; }
+
+  auto const* payload_u32 = reinterpret_cast<uint32_t const*>(
+    fastlanes::PageHeader::payload_ptr(result.host_blob.data()));
+  auto const page_mode_name = split64_mode ? "SPLIT64" : "RAW";
+  std::cout << "[FL ENCODED  ] page=" << page_idx << " chunk=" << chunk_id
+            << " chunk_page=" << chunk_page_index << " mode=" << page_mode_name
+            << " pre_delta=" << (hdr.pre_delta ? "true" : "false")
+            << " cast=" << fastlanes::debug::cast_mode_str(result.cast_mode)
+            << " hdr=" << fastlanes::PageHeader::header_size()
+            << " bw_lo=" << static_cast<int>(hdr.component_bitwidth_low)
+            << " bw_hi=" << static_cast<int>(hdr.component_bitwidth_high)
+            << " orig=" << hdr.original_count << " pad=" << hdr.padded_count
+            << " body=" << hdr.body_size << " min_lo=0x" << std::hex << hdr.min_value_low_bits
+            << " min_hi=0x" << hdr.min_value_high_bits << std::dec << " blob=" << result.total_size()
+            << "\n";
+  if (hdr.body_size >= sizeof(uint32_t)) {
+    std::cout << "[FL PAYLOAD  ] page=" << page_idx << " payload[0]=0x" << std::hex
+              << payload_u32[0] << std::dec << "\n";
+  }
+}
+
+void ensure_fastlanes_page_fits_reserved_size(size_t page_idx,
+                                              EncPage const& page,
+                                              uint32_t encoded_blob_size)
+{
+  if (encoded_blob_size > page.max_data_size) {
+    throw std::runtime_error("FastLanes encoded page exceeds reserved page size: page=" +
+                             std::to_string(page_idx) +
+                             " encoded=" + std::to_string(encoded_blob_size) +
+                             " reserved=" + std::to_string(page.max_data_size) +
+                             " num_leaf=" + std::to_string(page.num_leaf_values));
+  }
+}
+
+uint32_t register_fastlanes_upload(size_t page_idx,
+                                   fastlanes_cudf::EncodedPageResult&& result,
+                                   fastlanes_cpu_upload_buffers& upload_buffers)
+{
+  auto const encoded_blob_size = static_cast<uint32_t>(result.total_size());
+  upload_buffers.encoded_buffers.push_back(std::move(result.device_blob));
+  upload_buffers.host_upload_ptrs[page_idx] =
+    static_cast<uint8_t*>(upload_buffers.encoded_buffers.back().data());
+  upload_buffers.host_upload_sizes[page_idx] = encoded_blob_size;
+  return encoded_blob_size;
+}
+
+fastlanes_cudf::EncodedPageResult encode_fastlanes_int32_page(
+  device_span<EncPage> pages,
+  size_t page_idx,
+  uint32_t num_values,
+  fastlanes_cudf::FastLanesInt32Encoder& encoder,
+  rmm::cuda_stream_view stream)
+{
+  rmm::device_uvector<uint32_t> gather_buffer(num_values, stream);
+  gpuGatherSinglePageTyped<uint32_t, encode_block_size>
+    <<<1, encode_block_size, 0, stream.value()>>>(pages, page_idx, gather_buffer.data(), nullptr);
+  cudaStreamSynchronize(stream.value());
+
+  maybe_log_fastlanes_int32_vector_boundaries(gather_buffer, num_values, page_idx, stream);
+  return encoder.encode_page(reinterpret_cast<int32_t const*>(gather_buffer.data()),
+                             num_values,
+                             stream);
+}
+
+fastlanes_cudf::EncodedPageResult encode_fastlanes_int64_page(
+  device_span<EncPage> pages,
+  size_t page_idx,
+  uint32_t num_values,
+  fastlanes_cudf::FastLanesInt64Encoder& encoder,
+  rmm::cuda_stream_view stream)
+{
+  rmm::device_uvector<uint64_t> gather_buffer(num_values, stream);
+  gpuGatherSinglePageTyped<uint64_t, encode_block_size>
+    <<<1, encode_block_size, 0, stream.value()>>>(pages, page_idx, gather_buffer.data(), nullptr);
+  cudaStreamSynchronize(stream.value());
+
+  return encoder.encode_page(reinterpret_cast<int64_t const*>(gather_buffer.data()),
+                             num_values,
+                             stream);
+}
+
+void upload_fastlanes_results_and_launch(device_span<EncPage> pages,
+                                         bool write_v2_headers,
+                                         device_span<device_span<uint8_t const>> comp_in,
+                                         device_span<device_span<uint8_t>> comp_out,
+                                         device_span<codec_exec_result> comp_results,
+                                         fastlanes_cpu_upload_buffers const& upload_buffers,
+                                         uint32_t fastlanes_kernel_mask_bits,
+                                         rmm::cuda_stream_view stream)
+{
+  auto const num_pages = pages.size();
+  rmm::device_uvector<uint8_t*> d_upload_ptrs(num_pages, stream);
+  rmm::device_uvector<uint32_t> d_upload_sizes(num_pages, stream);
+  cudaMemcpyAsync(d_upload_ptrs.data(),
+                  upload_buffers.host_upload_ptrs.data(),
+                  num_pages * sizeof(uint8_t*),
+                  cudaMemcpyHostToDevice,
+                  stream.value());
+  cudaMemcpyAsync(d_upload_sizes.data(),
+                  upload_buffers.host_upload_sizes.data(),
+                  num_pages * sizeof(uint32_t),
+                  cudaMemcpyHostToDevice,
+                  stream.value());
+
+  gpuEncodePageLevels<encode_block_size><<<num_pages, encode_block_size, 0, stream.value()>>>(
+    pages,
+    write_v2_headers,
+    static_cast<encode_kernel_mask>(fastlanes_kernel_mask_bits));
+
+  gpuEncodeCpuPages<encode_block_size><<<num_pages, encode_block_size, 0, stream.value()>>>(
+    pages,
+    comp_in,
+    comp_out,
+    comp_results,
+    d_upload_ptrs.data(),
+    d_upload_sizes.data(),
+    write_v2_headers);
+}
+
+void run_fastlanes_cpu_bitpack_encode(device_span<EncPage> pages,
+                                      bool write_v2_headers,
+                                      device_span<device_span<uint8_t const>> comp_in,
+                                      device_span<device_span<uint8_t>> comp_out,
+                                      device_span<codec_exec_result> comp_results,
+                                      uint32_t fastlanes_kernel_mask_bits,
+                                      rmm::cuda_stream_view stream)
+{
+  auto host_pages = copy_fastlanes_pages_to_host(pages, stream);
+  fastlanes_cpu_upload_buffers upload_buffers(pages.size());
+
+  std::unique_ptr<fastlanes_cudf::FastLanesInt32Encoder> encoder_i32;
+  std::unique_ptr<fastlanes_cudf::FastLanesInt64Encoder> encoder_i64;
+
+  auto get_encoder_i32 = [&]() -> fastlanes_cudf::FastLanesInt32Encoder& {
+    if (!encoder_i32) { encoder_i32 = std::make_unique<fastlanes_cudf::FastLanesInt32Encoder>(false); }
+    return *encoder_i32;
+  };
+
+  auto get_encoder_i64 = [&]() -> fastlanes_cudf::FastLanesInt64Encoder& {
+    if (!encoder_i64) { encoder_i64 = std::make_unique<fastlanes_cudf::FastLanesInt64Encoder>(false); }
+    return *encoder_i64;
+  };
+
+  std::unordered_map<uint32_t, uint32_t> chunk_page_counters;
+  for (size_t page_idx = 0; page_idx < pages.size(); ++page_idx) {
+    if (not is_fastlanes_bitpack_mask(host_pages[page_idx].kernel_mask)) { continue; }
+
+    auto const chunk_id         = host_pages[page_idx].chunk_id;
+    auto const chunk_page_index = chunk_page_counters[chunk_id]++;
+    uint32_t const num_values   = host_pages[page_idx].num_leaf_values;
+    if (num_values == 0) { continue; }
+
+    maybe_log_fastlanes_host_page_meta(host_pages[page_idx], page_idx, chunk_page_index);
+
+    auto const type_info = gather_fastlanes_page_type_info(pages, page_idx, stream);
+
+    if (type_info.physical_type == Type::INT32) {
+      auto result = encode_fastlanes_int32_page(
+        pages, page_idx, num_values, get_encoder_i32(), stream);
+
+      auto const hdr = fastlanes::PageHeader::deserialize(result.host_blob.data());
+      validate_fastlanes_pre_delta_policy(host_pages[page_idx].kernel_mask, hdr);
+
+      auto const split64_mode =
+        fastlanes_encoding_for_mask(host_pages[page_idx].kernel_mask) ==
+        Encoding::FASTLANE_BITPACK_SPLIT64;
+      maybe_log_fastlanes_encoded_scalar32(
+        page_idx, chunk_id, chunk_page_index, split64_mode, hdr, result);
+
+      auto const encoded_blob_size = static_cast<uint32_t>(result.total_size());
+      ensure_fastlanes_page_fits_reserved_size(page_idx, host_pages[page_idx], encoded_blob_size);
+
+      register_fastlanes_upload(page_idx, std::move(result), upload_buffers);
+
+      if (fastlanes::debug::is_workload_enabled()) {
+        std::cout << "[FL UPLOAD   ] page=" << page_idx
+                  << " ptr=" << static_cast<void*>(upload_buffers.host_upload_ptrs[page_idx])
+                  << " size=" << upload_buffers.host_upload_sizes[page_idx] << "\n";
+      }
+    } else if (type_info.physical_type == Type::INT64 &&
+               (type_info.logical_type == cudf::type_id::INT64 ||
+                type_info.logical_type == cudf::type_id::UINT64)) {
+      auto result = encode_fastlanes_int64_page(
+        pages, page_idx, num_values, get_encoder_i64(), stream);
+
+      auto const hdr = fastlanes::PageHeader::deserialize(result.host_blob.data());
+      validate_fastlanes_pre_delta_policy(host_pages[page_idx].kernel_mask, hdr);
+
+      auto const split64_mode =
+        fastlanes_encoding_for_mask(host_pages[page_idx].kernel_mask) ==
+        Encoding::FASTLANE_BITPACK_SPLIT64;
+      maybe_log_fastlanes_encoded_split32(
+        page_idx, chunk_id, chunk_page_index, split64_mode, hdr, result);
+
+      auto const encoded_blob_size = static_cast<uint32_t>(result.total_size());
+      ensure_fastlanes_page_fits_reserved_size(page_idx, host_pages[page_idx], encoded_blob_size);
+
+      register_fastlanes_upload(page_idx, std::move(result), upload_buffers);
+
+      if (fastlanes::debug::is_workload_enabled()) {
+        std::cout << "[FL UPLOAD   ] page=" << page_idx
+                  << " ptr=" << static_cast<void*>(upload_buffers.host_upload_ptrs[page_idx])
+                  << " size=" << upload_buffers.host_upload_sizes[page_idx] << "\n";
+      }
+    } else {
+      throw std::invalid_argument(
+        "FastLanes BitPacking supports selected INT32 and INT64 logical types in flat pages");
+    }
+  }
+
+  upload_fastlanes_results_and_launch(pages,
+                                      write_v2_headers,
+                                      comp_in,
+                                      comp_out,
+                                      comp_results,
+                                      upload_buffers,
+                                      fastlanes_kernel_mask_bits,
+                                      stream);
+}
+
+}  // namespace
+
 void EncodePages(device_span<EncPage> pages,
                  bool write_v2_headers,
                  device_span<device_span<uint8_t const>> comp_in,
@@ -3891,237 +4230,13 @@ void EncodePages(device_span<EncPage> pages,
   // ========================================
   if (has_fastlanes_bitpack) {
     auto const strm = streams[s_idx++];
-
-    // 1. Copy page metadata to host
-    std::vector<EncPage> h_pages(pages.size());
-    cudaMemcpyAsync(
-      h_pages.data(), pages.data(), pages.size_bytes(), cudaMemcpyDeviceToHost, strm.value());
-    cudaStreamSynchronize(strm.value());
-
-    // 2. Prepare result storage
-    std::vector<rmm::device_buffer> encoded_buffers;
-    std::vector<uint8_t*> h_upload_ptrs(num_pages, nullptr);
-    std::vector<uint32_t> h_upload_sizes(num_pages, 0);
-    encoded_buffers.reserve(num_pages);
-
-    // Trade-off: keep host-side type handling simple instead of plumbing more metadata
-    // through the write path. We still query both parquet physical type and logical leaf
-    // type here so the dispatch mirrors the main encode flow and is easy to extend later.
-    std::unique_ptr<fastlanes_cudf::FastLanesInt32Encoder> encoder_i32;
-    std::unique_ptr<fastlanes_cudf::FastLanesInt64Encoder> encoder_i64;
-
-    auto get_encoder_i32 = [&]() -> fastlanes_cudf::FastLanesInt32Encoder& {
-      if (!encoder_i32) {
-        encoder_i32 = std::make_unique<fastlanes_cudf::FastLanesInt32Encoder>(false);
-      }
-      return *encoder_i32;
-    };
-
-    auto get_encoder_i64 = [&]() -> fastlanes_cudf::FastLanesInt64Encoder& {
-      if (!encoder_i64) {
-        encoder_i64 = std::make_unique<fastlanes_cudf::FastLanesInt64Encoder>(false);
-      }
-      return *encoder_i64;
-    };
-
-    // 3. Process each page individually with simple type dispatch.
-    std::unordered_map<uint32_t, uint32_t> chunk_page_counters;
-    for (size_t page_idx = 0; page_idx < num_pages; ++page_idx) {
-      if (not is_fastlanes_bitpack_mask(h_pages[page_idx].kernel_mask)) {
-        continue;
-      }
-
-      auto const chunk_id         = h_pages[page_idx].chunk_id;
-      auto const chunk_page_index = chunk_page_counters[chunk_id]++;
-      uint32_t const num_values = h_pages[page_idx].num_leaf_values;
-      if (num_values == 0) { continue; }
-
-      if (fastlanes::debug::is_header_enabled()) {
-        std::cout << "[FL HOST META ] page=" << page_idx << " chunk=" << chunk_id
-                  << " chunk_page=" << chunk_page_index
-                  << " start_row=" << h_pages[page_idx].start_row
-                  << " num_rows=" << h_pages[page_idx].num_rows
-                  << " num_leaf=" << h_pages[page_idx].num_leaf_values
-                  << " max_data_size=" << h_pages[page_idx].max_data_size << "\n";
-      }
-
-      rmm::device_scalar<fastlanes_page_type_info> d_type_info(
-        fastlanes_page_type_info{}, strm);
-      gpuGatherSinglePageTyped<int32_t, encode_block_size>
-        <<<1, encode_block_size, 0, strm.value()>>>(pages, page_idx, nullptr, d_type_info.data());
-      auto const type_info = d_type_info.value(strm);
-
-      if (type_info.physical_type == Type::INT32) {
-        // Keep one encode path by gathering raw INT32-physical bits and reinterpreting as int32.
-        rmm::device_uvector<uint32_t> d_gather_buffer(num_values, strm);
-        gpuGatherSinglePageTyped<uint32_t, encode_block_size>
-          <<<1, encode_block_size, 0, strm.value()>>>(pages, page_idx, d_gather_buffer.data(), nullptr);
-        cudaStreamSynchronize(strm.value());
-
-        if (fastlanes::debug::is_vector_boundary_enabled()) {
-          auto print_u32_at = [&](uint32_t idx, char const* tag) {
-            if (idx >= num_values) return;
-            uint32_t v{};
-            cudaMemcpyAsync(&v,
-                            d_gather_buffer.data() + idx,
-                            sizeof(uint32_t),
-                            cudaMemcpyDeviceToHost,
-                            strm.value());
-            cudaStreamSynchronize(strm.value());
-            std::cout << "[FL GATHER   ] page=" << page_idx << " " << tag << " idx=" << idx
-                      << " val=0x" << std::hex << v << std::dec << "\n";
-          };
-          print_u32_at(0, "head");
-          print_u32_at(1, "head");
-          if (num_values > 1023) { print_u32_at(1023, "boundary"); }
-          if (num_values > 1024) { print_u32_at(1024, "boundary"); }
-        }
-
-        auto result = get_encoder_i32().encode_page(
-          reinterpret_cast<int32_t const*>(d_gather_buffer.data()), num_values, strm);
-
-        auto const hdr = fastlanes::PageHeader::deserialize(result.host_blob.data());
-        auto const split64_mode =
-          fastlanes_encoding_for_mask(h_pages[page_idx].kernel_mask) ==
-          Encoding::FASTLANE_BITPACK_SPLIT64;
-        if (!fastlanes::is_pre_delta_valid_for_mode(split64_mode, hdr.pre_delta)) {
-          throw std::invalid_argument(
-            "FastLanes: invalid PRE_DELTA policy for selected page encoding mode");
-        }
-
-        if (fastlanes::debug::is_workload_enabled()) {
-          auto const* payload_u32 = reinterpret_cast<uint32_t const*>(
-            fastlanes::PageHeader::payload_ptr(result.host_blob.data()));
-          auto const page_mode_name = split64_mode ? "SPLIT64" : "RAW";
-          std::cout << "[FL ENCODED  ] page=" << page_idx << " chunk=" << chunk_id
-                    << " chunk_page=" << chunk_page_index
-                    << " mode=" << page_mode_name
-                    << " pre_delta=" << (hdr.pre_delta ? "true" : "false")
-                    << " cast=" << fastlanes::debug::cast_mode_str(result.cast_mode)
-                    << " hdr=" << fastlanes::PageHeader::header_size()
-                    << " bw=" << static_cast<int>(hdr.component_bitwidth_low)
-                    << " orig=" << hdr.original_count << " pad=" << hdr.padded_count
-                    << " body=" << hdr.body_size << " min=0x" << std::hex
-                    << hdr.min_value_bits()
-                    << std::dec << " blob=" << result.total_size() << "\n";
-          if (hdr.body_size >= sizeof(uint32_t)) {
-            std::cout << "[FL PAYLOAD  ] page=" << page_idx << " payload[0]=0x" << std::hex
-                      << payload_u32[0] << std::dec << "\n";
-          }
-        }
-
-        auto const encoded_blob_size = static_cast<uint32_t>(result.total_size());
-        if (encoded_blob_size > h_pages[page_idx].max_data_size) {
-          throw std::runtime_error("FastLanes encoded page exceeds reserved page size: page=" +
-                                   std::to_string(page_idx) +
-                                   " encoded=" + std::to_string(encoded_blob_size) +
-                                   " reserved=" +
-                                   std::to_string(h_pages[page_idx].max_data_size) +
-                                   " num_leaf=" +
-                                   std::to_string(h_pages[page_idx].num_leaf_values));
-        }
-
-        encoded_buffers.push_back(std::move(result.device_blob));
-        h_upload_ptrs[page_idx]  = static_cast<uint8_t*>(encoded_buffers.back().data());
-        h_upload_sizes[page_idx] = encoded_blob_size;
-
-        if (fastlanes::debug::is_workload_enabled()) {
-          std::cout << "[FL UPLOAD   ] page=" << page_idx
-                    << " ptr=" << static_cast<void*>(h_upload_ptrs[page_idx])
-                    << " size=" << h_upload_sizes[page_idx] << "\n";
-        }
-      } else if (type_info.physical_type == Type::INT64 &&
-                 (type_info.logical_type == cudf::type_id::INT64 ||
-                  type_info.logical_type == cudf::type_id::UINT64)) {
-        rmm::device_uvector<uint64_t> d_gather_buffer(num_values, strm);
-        gpuGatherSinglePageTyped<uint64_t, encode_block_size>
-          <<<1, encode_block_size, 0, strm.value()>>>(pages, page_idx, d_gather_buffer.data(), nullptr);
-        cudaStreamSynchronize(strm.value());
-
-        auto result = get_encoder_i64().encode_page(
-          reinterpret_cast<int64_t const*>(d_gather_buffer.data()), num_values, strm);
-
-        auto const hdr = fastlanes::PageHeader::deserialize(result.host_blob.data());
-        auto const split64_mode =
-          fastlanes_encoding_for_mask(h_pages[page_idx].kernel_mask) ==
-          Encoding::FASTLANE_BITPACK_SPLIT64;
-        if (!fastlanes::is_pre_delta_valid_for_mode(split64_mode, hdr.pre_delta)) {
-          throw std::invalid_argument(
-            "FastLanes: invalid PRE_DELTA policy for selected page encoding mode");
-        }
-
-        if (fastlanes::debug::is_workload_enabled()) {
-          auto const* payload_u32 = reinterpret_cast<uint32_t const*>(
-            fastlanes::PageHeader::payload_ptr(result.host_blob.data()));
-          auto const page_mode_name = split64_mode ? "SPLIT64" : "RAW";
-          std::cout << "[FL ENCODED  ] page=" << page_idx << " chunk=" << chunk_id
-                    << " chunk_page=" << chunk_page_index
-                    << " mode=" << page_mode_name
-                    << " pre_delta=" << (hdr.pre_delta ? "true" : "false")
-                    << " cast=" << fastlanes::debug::cast_mode_str(result.cast_mode)
-                    << " hdr=" << fastlanes::PageHeader::header_size()
-                    << " bw_lo=" << static_cast<int>(hdr.component_bitwidth_low)
-                    << " bw_hi=" << static_cast<int>(hdr.component_bitwidth_high)
-                    << " orig=" << hdr.original_count << " pad=" << hdr.padded_count
-                    << " body=" << hdr.body_size << " min_lo=0x" << std::hex
-                    << hdr.min_value_low_bits << " min_hi=0x" << hdr.min_value_high_bits
-                    << std::dec << " blob=" << result.total_size() << "\n";
-          if (hdr.body_size >= sizeof(uint32_t)) {
-            std::cout << "[FL PAYLOAD  ] page=" << page_idx << " payload[0]=0x" << std::hex
-                      << payload_u32[0] << std::dec << "\n";
-          }
-        }
-
-        auto const encoded_blob_size = static_cast<uint32_t>(result.total_size());
-        if (encoded_blob_size > h_pages[page_idx].max_data_size) {
-          throw std::runtime_error("FastLanes encoded page exceeds reserved page size: page=" +
-                                   std::to_string(page_idx) +
-                                   " encoded=" + std::to_string(encoded_blob_size) +
-                                   " reserved=" +
-                                   std::to_string(h_pages[page_idx].max_data_size) +
-                                   " num_leaf=" +
-                                   std::to_string(h_pages[page_idx].num_leaf_values));
-        }
-
-        encoded_buffers.push_back(std::move(result.device_blob));
-        h_upload_ptrs[page_idx]  = static_cast<uint8_t*>(encoded_buffers.back().data());
-        h_upload_sizes[page_idx] = encoded_blob_size;
-
-        if (fastlanes::debug::is_workload_enabled()) {
-          std::cout << "[FL UPLOAD   ] page=" << page_idx
-                    << " ptr=" << static_cast<void*>(h_upload_ptrs[page_idx])
-                    << " size=" << h_upload_sizes[page_idx] << "\n";
-        }
-      } else {
-        throw std::invalid_argument(
-          "FastLanes BitPacking supports selected INT32 and INT64 logical types in flat pages");
-      }
-    }
-
-    // 5. Copy upload pointers to device
-    rmm::device_uvector<uint8_t*> d_upload_ptrs(num_pages, strm);
-    rmm::device_uvector<uint32_t> d_upload_sizes(num_pages, strm);
-    cudaMemcpyAsync(d_upload_ptrs.data(),
-                    h_upload_ptrs.data(),
-                    num_pages * sizeof(uint8_t*),
-                    cudaMemcpyHostToDevice,
-                    strm.value());
-    cudaMemcpyAsync(d_upload_sizes.data(),
-                    h_upload_sizes.data(),
-                    num_pages * sizeof(uint32_t),
-                    cudaMemcpyHostToDevice,
-                    strm.value());
-
-    // 6. Launch Page Levels Encoder
-    gpuEncodePageLevels<encode_block_size><<<num_pages, encode_block_size, 0, strm.value()>>>(
-      pages,
-      write_v2_headers,
-      static_cast<encode_kernel_mask>(fastlanes_kernel_mask_bits));
-
-    // 7. Launch Copy Kernel
-    gpuEncodeCpuPages<encode_block_size><<<num_pages, encode_block_size, 0, strm.value()>>>(
-      pages, comp_in, comp_out, comp_results, 
-      d_upload_ptrs.data(), d_upload_sizes.data(), write_v2_headers);
+    run_fastlanes_cpu_bitpack_encode(pages,
+                                     write_v2_headers,
+                                     comp_in,
+                                     comp_out,
+                                     comp_results,
+                                     fastlanes_kernel_mask_bits,
+                                     strm);
   }
   cudf::detail::join_streams(streams, stream);
 }
