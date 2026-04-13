@@ -81,7 +81,8 @@ CUDF_HOST_DEVICE constexpr bool is_supported_encoding(Encoding enc)
     case Encoding::DELTA_BYTE_ARRAY:
     case Encoding::BYTE_STREAM_SPLIT: 
     case Encoding::FASTLANE_BITPACK_RAW:
-    case Encoding::FASTLANE_BITPACK_SPLIT64: return true;
+    case Encoding::FASTLANE_BITPACK_SPLIT64:
+    case Encoding::FASTLANES_DELTA_BINARY: return true;
     default: return false;
   }
 }

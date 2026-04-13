@@ -218,26 +218,46 @@ START NOW
 
 MY OBJECTIVE BEGIN
 
-**Task: Remove redundant metadata struct and its related functions**
-In `native64_cuda_kernels.inl`, the `native64_encode_metadata` struct is redundant. Please completely delete:
-1. The `native64_encode_metadata` struct definition.
-2. The `derive_min_base_bits_metadata` function.
-3. The `derive_min_base_bits_metadata_to_device` helper function. 
-4. Any associated "metadata helpers" section comments.
+Here is a comprehensive, structured prompt designed specifically to be fed into a planning LLM. It gives the LLM all the context, constraints, and explicit step-by-step tasks it needs to correctly refactor both the encoding and decoding paths.
 
-**Task: Reorganize into a proper 3-file architecture (.cuh, .cu, .inl)**
-Currently, the codebase includes the `.inl` file directly, which can cause compile-time and Multiple Definition issues. Please reorganize the `native64` kernel code into a standard 3-file architecture:
+***
 
-1. **Create `cpp/include/cudf/fastlanes/native64_cuda.cuh`:**
-   - This should be a lightweight header file containing ONLY the declarations for the public APIs inside the `native64_generated` namespace. 
-   - Add the signatures for `encode_by_bw_gpu_device_ptrs` and `decode_by_bw_gpu_device_ptrs`.
+**Copy and paste the following prompt to your Planning LLM:**
 
-2. **Create `cpp/src/fastlanes/native64_cuda.cu`:**
-   - This will be the actual compilation target.
-   - It should include the new header (`#include <cudf/fastlanes/native64_cuda.cuh>`) and any required standard/CUDA headers.
-   - At the very bottom of this `.cu` file, include the inline definitions: `#include <cudf/fastlanes/native64_cuda_kernels.inl>`.
+```text
+# SYSTEM ARCHITECTURE & REFACTORING PLAN: Parquet FastLanes Encoders & Decoders
 
-3. **Update Callers:**
-   - Find any files (like the test files, e.g., `parquet_fastlanes_native64_generated_test.cu`) that currently `#include "native64_cuda_kernels.inl"` and change them to `#include <cudf/fastlanes/native64_cuda.cuh>` instead.
+## Context & The Problem
+We need to refactor the cuDF Parquet FastLanes integration to eliminate "Template Fatigue." Currently, the encoder implementation (`fastlanes_encode.cu/.cuh`) uses heavy templating (`encode_page_impl<T>`) to mash together completely different execution models. The decoder is similarly overloaded. 
 
+We are introducing a new GPU-native 64-bit encoding, which means we now have three fundamentally distinct execution paths that must be explicitly separated in both the encoding and decoding stages:
+
+1. **32-bit CPU Path:** Uses `Encoding::FASTLANE_BITPACK_RAW`. Data is encoded on the CPU. The kernel does not apply a delta internally.
+2. **64-bit Split32 CPU Path:** Uses `Encoding::FASTLANE_BITPACK_SPLIT64`. Data is encoded on the CPU by splitting 64-bit integers into two 32-bit streams.
+3. **64-bit Native GPU Path (NEW):** Uses `Encoding::FASTLANES_DELTA_BINARY`. Data is encoded entirely on the GPU. The encoding/decoding kernels handle the delta internally.
+
+## Your Objective
+Please create a detailed implementation plan and write the code to cleanly separate these three paths. 
+
+### Intent 1: Refactor the Public Encoder API (`fastlanes_encode.cuh`)
+- **Intent:** Make the API explicitly reflect the three execution paths. 
+- **Action:** Keep `FastLanesInt32Encoder`. Rename the existing 64-bit encoder to `FastLanesInt64Split32Encoder`. Create a new `FastLanesInt64NativeEncoder`. All three should share the same public method signatures (`encode_page` and `encode_pages`).
+
+### Intent 2: De-template the Encoder Implementation (`fastlanes_encode.cu`)
+- **Intent:** Remove the generic `encode_page_impl<T>` and `encode_pages_impl<T>`. Stop using `if constexpr` to switch between CPU and GPU workflows.
+- **Action:** Create three dedicated, non-templated helper functions in the anonymous namespace for single-page and batch encoding. Map the three classes from Intent 1 directly to these specific helpers. 
+
+### Intent 3: Implement the Native64 GPU Encoder
+- **Intent:** The new `FASTLANES_DELTA_BINARY` path must be 100% GPU-accelerated. No input data should be downloaded to the host.
+- **Action:** Design the Native64 helper to use the `native64_generated` API. It must compute the minimum value (base bits) on the GPU, compute the maximum delta and bitwidth on the GPU (e.g., using Thrust/CUB), allocate the final device buffer (including space for the 128-byte header), pack the data on the GPU, and finally generate and copy the header from the CPU to the device buffer.
+
+### Intent 4: Separate the Decode Kernels (`page_decode.cuh` / `fastlanes.cu`)
+- **Intent:** Currently, the decode dispatcher launches an INT32 and an INT64 kernel, which try to dynamically figure out what to do. We want a strict 1-to-1 mapping between the three encoding types and their respective CUDA kernels.
+- **Action:** 
+  1. Refactor the page validation logic (`setup_and_validate_fastlanes_page`) to properly identify and route `FASTLANE_BITPACK_RAW`, `FASTLANE_BITPACK_SPLIT64`, and `FASTLANES_DELTA_BINARY` based on the page metadata.
+  2. Create three explicitly named `__global__` decode kernels, one for each encoding type.
+  3. Implement the new Native64 decode kernel using the `native64_generated` decoding API. Remember that this specific format handles the delta internally, unlike the raw bitpack.
+  4. Update the host launch function (`decode_fastlanes_binary`) to dispatch to all three kernels, relying on the internal kernel validation to allow threads to early-exit if the page doesn't match their designated encoding.
+
+Please analyze this architecture, confirm your understanding of the separation of concerns, and then provide the refactored code for both the encoder and decoder.
 MY OBJECTIVE END

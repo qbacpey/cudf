@@ -32,14 +32,38 @@ struct EncodedPageResult {
   [[nodiscard]] size_t total_size() const { return host_blob.size(); }
 };
 
+/**
+ * @brief CPU FastLanes encoder for INT32 payloads using RAW32 page layout.
+ */
 class FastLanesInt32Encoder {
  public:
+  /**
+   * @brief Construct an INT32 FastLanes encoder.
+   *
+   * @param debug_print Enable verbose debug output for encoded page metadata.
+   */
   explicit FastLanesInt32Encoder(bool debug_print = false);
 
+  /**
+   * @brief Encode one INT32 page into a FastLanes RAW32 payload.
+   *
+   * @param d_input Device pointer to page values.
+   * @param count Number of values in the page.
+   * @param stream CUDA stream used for staging and uploads.
+   * @return Encoded page blob and metadata.
+   */
   EncodedPageResult encode_page(int32_t const* d_input,
                                 uint32_t count,
                                 rmm::cuda_stream_view stream);
 
+  /**
+   * @brief Encode a batch of INT32 pages into FastLanes RAW32 payloads.
+   *
+   * @param h_gather_ptrs Host list of device page pointers.
+   * @param h_gather_counts Value counts for each page pointer.
+   * @param stream CUDA stream used for staging and uploads.
+   * @return Uploaded buffers, per-page device pointers, and per-page encoded sizes.
+   */
   std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
   encode_pages(std::vector<int32_t*> const& h_gather_ptrs,
                std::vector<uint32_t> const& h_gather_counts,
@@ -49,14 +73,83 @@ class FastLanesInt32Encoder {
   bool debug_print_;
 };
 
-class FastLanesInt64Encoder {
+/**
+ * @brief CPU FastLanes encoder for INT64 payloads using SPLIT64 page layout.
+ */
+class FastLanesInt64Split32Encoder {
  public:
-  explicit FastLanesInt64Encoder(bool debug_print = false);
+  /**
+   * @brief Construct an INT64 SPLIT64 FastLanes encoder.
+   *
+   * @param debug_print Enable verbose debug output for encoded page metadata.
+   */
+  explicit FastLanesInt64Split32Encoder(bool debug_print = false);
 
+  /**
+   * @brief Encode one INT64 page into a FastLanes SPLIT64 payload.
+   *
+   * @param d_input Device pointer to page values.
+   * @param count Number of values in the page.
+   * @param stream CUDA stream used for staging and uploads.
+   * @return Encoded page blob and metadata.
+   */
   EncodedPageResult encode_page(int64_t const* d_input,
                                 uint32_t count,
                                 rmm::cuda_stream_view stream);
 
+  /**
+   * @brief Encode a batch of INT64 pages into FastLanes SPLIT64 payloads.
+   *
+   * @param h_gather_ptrs Host list of device page pointers.
+   * @param h_gather_counts Value counts for each page pointer.
+   * @param stream CUDA stream used for staging and uploads.
+   * @return Uploaded buffers, per-page device pointers, and per-page encoded sizes.
+   */
+  std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
+  encode_pages(std::vector<int64_t*> const& h_gather_ptrs,
+               std::vector<uint32_t> const& h_gather_counts,
+               rmm::cuda_stream_view stream);
+
+ private:
+  bool debug_print_;
+};
+
+/**
+ * @brief Native64 FastLanes encoder entry point for INT64 payloads.
+ *
+ * Native64 behavior is introduced in a staged rollout. In non-activation stages,
+ * this class can surface explicit not-yet-enabled behavior instead of silently
+ * falling back to SPLIT64.
+ */
+class FastLanesInt64NativeEncoder {
+ public:
+  /**
+   * @brief Construct an INT64 Native64 FastLanes encoder.
+   *
+   * @param debug_print Enable verbose debug output for encoded page metadata.
+   */
+  explicit FastLanesInt64NativeEncoder(bool debug_print = false);
+
+  /**
+   * @brief Encode one INT64 page into a FastLanes Native64 payload.
+   *
+   * @param d_input Device pointer to page values.
+   * @param count Number of values in the page.
+   * @param stream CUDA stream used for staging and uploads.
+   * @return Encoded page blob and metadata.
+   */
+  EncodedPageResult encode_page(int64_t const* d_input,
+                                uint32_t count,
+                                rmm::cuda_stream_view stream);
+
+  /**
+   * @brief Encode a batch of INT64 pages into FastLanes Native64 payloads.
+   *
+   * @param h_gather_ptrs Host list of device page pointers.
+   * @param h_gather_counts Value counts for each page pointer.
+   * @param stream CUDA stream used for staging and uploads.
+   * @return Uploaded buffers, per-page device pointers, and per-page encoded sizes.
+   */
   std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
   encode_pages(std::vector<int64_t*> const& h_gather_ptrs,
                std::vector<uint32_t> const& h_gather_counts,

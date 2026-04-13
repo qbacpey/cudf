@@ -332,8 +332,10 @@ EncodedPageResult encode_split32_page(std::vector<int64_t> const& host_input,
   return result;
 }
 
-template <typename T>
-EncodedPageResult create_empty_result(rmm::cuda_stream_view stream)
+/**
+ * @brief Build an empty RAW32-encoded page result.
+ */
+EncodedPageResult create_empty_scalar32_result(rmm::cuda_stream_view stream)
 {
   EncodedPageResult result;
   result.bitwidth       = 1;
@@ -343,13 +345,8 @@ EncodedPageResult create_empty_result(rmm::cuda_stream_view stream)
   result.body_size      = 0;
   result.min_value      = 0;
 
-  if constexpr (std::is_same_v<T, int64_t>) {
-    result.host_blob = fastlanes::PageHeader::serialize_split32(
-      1, 1, 0, 0, 0, 0, nullptr, 0, fastlanes::default_pre_delta_for_mode(true));
-  } else {
-    result.host_blob = fastlanes::PageHeader::serialize_scalar32(
-      1, 0, 0, 0, nullptr, 0, fastlanes::default_pre_delta_for_mode(false));
-  }
+  result.host_blob = fastlanes::PageHeader::serialize_scalar32(
+    1, 0, 0, 0, nullptr, 0, fastlanes::default_pre_delta_for_mode(false));
 
   result.device_blob = rmm::device_buffer(result.host_blob.size(), stream);
   cuda_check(cudaMemcpyAsync(result.device_blob.data(),
@@ -362,47 +359,118 @@ EncodedPageResult create_empty_result(rmm::cuda_stream_view stream)
   return result;
 }
 
-template <typename T>
-EncodedPageResult encode_page_impl(T const* d_input,
-                                   uint32_t count,
-                                   rmm::cuda_stream_view stream,
-                                   bool debug_print)
+/**
+ * @brief Build an empty SPLIT64-encoded page result.
+ */
+EncodedPageResult create_empty_split32_result(rmm::cuda_stream_view stream)
 {
-  if (count == 0) { return create_empty_result<T>(stream); }
+  EncodedPageResult result;
+  result.bitwidth       = 1;
+  result.cast_mode      = fastlanes::TypeCastMode::SIGNED_SAFE;
+  result.original_count = 0;
+  result.padded_count   = 0;
+  result.body_size      = 0;
+  result.min_value      = 0;
+
+  result.host_blob = fastlanes::PageHeader::serialize_split32(
+    1, 1, 0, 0, 0, 0, nullptr, 0, fastlanes::default_pre_delta_for_mode(true));
+
+  result.device_blob = rmm::device_buffer(result.host_blob.size(), stream);
+  cuda_check(cudaMemcpyAsync(result.device_blob.data(),
+                             result.host_blob.data(),
+                             result.host_blob.size(),
+                             cudaMemcpyHostToDevice,
+                             stream.value()),
+             "upload empty blob");
+
+  return result;
+}
+
+/**
+ * @brief Encode one INT32 page via the explicit RAW32 helper path.
+ */
+EncodedPageResult encode_scalar32_page_helper(int32_t const* d_input,
+                                              uint32_t count,
+                                              rmm::cuda_stream_view stream,
+                                              bool debug_print)
+{
+  if (count == 0) { return create_empty_scalar32_result(stream); }
 
   if (d_input == nullptr) {
     throw std::invalid_argument("FastLanesEncoder: device input pointer is null");
   }
 
   uint64_t const padded = fastlanes::padded_count(count);
-  std::vector<T> host_input(padded, T{0});
+  std::vector<int32_t> host_input(padded, int32_t{0});
 
   cuda_check(cudaMemcpyAsync(host_input.data(),
                              d_input,
-                             count * sizeof(T),
+                             count * sizeof(int32_t),
                              cudaMemcpyDeviceToHost,
                              stream.value()),
              "download");
   cuda_check(cudaStreamSynchronize(stream.value()), "stream synchronize after download");
 
   auto const cast_mode = analyze_data(host_input.data(), count).first;
-
-  if constexpr (std::is_same_v<T, int64_t>) {
-    // TODO(native64): if a native 64-bit FastLanes payload mode is introduced,
-    // branch here to a dedicated encode_native64_page(...) path and serialize
-    // with a NATIVE64 header layout instead of split32 component streams.
-    return encode_split32_page(host_input, count, padded, cast_mode, stream);
-  }
-
   return encode_scalar32_page(host_input, count, padded, cast_mode, stream, debug_print);
 }
 
-template <typename T>
+/**
+ * @brief Encode one INT64 page via the explicit SPLIT64 helper path.
+ */
+EncodedPageResult encode_split32_page_helper(int64_t const* d_input,
+                                             uint32_t count,
+                                             rmm::cuda_stream_view stream,
+                                             bool debug_print)
+{
+  static_cast<void>(debug_print);
+
+  if (count == 0) { return create_empty_split32_result(stream); }
+
+  if (d_input == nullptr) {
+    throw std::invalid_argument("FastLanesEncoder: device input pointer is null");
+  }
+
+  uint64_t const padded = fastlanes::padded_count(count);
+  std::vector<int64_t> host_input(padded, int64_t{0});
+
+  cuda_check(cudaMemcpyAsync(host_input.data(),
+                             d_input,
+                             count * sizeof(int64_t),
+                             cudaMemcpyDeviceToHost,
+                             stream.value()),
+             "download");
+  cuda_check(cudaStreamSynchronize(stream.value()), "stream synchronize after download");
+
+  auto const cast_mode = analyze_data(host_input.data(), count).first;
+  return encode_split32_page(host_input, count, padded, cast_mode, stream);
+}
+
+/**
+ * @brief Encode one INT64 page via the explicit Native64 helper path.
+ *
+ * This helper is intentionally disabled until the native64 writer path is activated.
+ */
+EncodedPageResult encode_native64_page_helper(int64_t const* d_input,
+                                              uint32_t count,
+                                              rmm::cuda_stream_view stream,
+                                              bool debug_print)
+{
+  static_cast<void>(d_input);
+  static_cast<void>(count);
+  static_cast<void>(stream);
+  static_cast<void>(debug_print);
+  throw std::invalid_argument("FastLanes Native64 encode path is not enabled in this stage");
+}
+
+/**
+ * @brief Encode a batch of INT32 pages via the explicit RAW32 helper path.
+ */
 std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
-encode_pages_impl(std::vector<T*> const& h_gather_ptrs,
-                  std::vector<uint32_t> const& h_gather_counts,
-                  rmm::cuda_stream_view stream,
-                  bool debug_print)
+encode_scalar32_pages_helper(std::vector<int32_t*> const& h_gather_ptrs,
+                             std::vector<uint32_t> const& h_gather_counts,
+                             rmm::cuda_stream_view stream,
+                             bool debug_print)
 {
   size_t const num_pages = h_gather_ptrs.size();
 
@@ -412,12 +480,76 @@ encode_pages_impl(std::vector<T*> const& h_gather_ptrs,
   encoded_buffers.reserve(num_pages);
 
   for (size_t i = 0; i < num_pages; ++i) {
-    if (h_gather_ptrs[i] == nullptr) continue;
+    if (h_gather_ptrs[i] == nullptr) { continue; }
 
     uint32_t const count = h_gather_counts[i];
-    if (count == 0) continue;
+    if (count == 0) { continue; }
 
-    auto page = encode_page_impl<T>(h_gather_ptrs[i], count, stream, debug_print);
+    auto page = encode_scalar32_page_helper(h_gather_ptrs[i], count, stream, debug_print);
+
+    encoded_buffers.push_back(std::move(page.device_blob));
+    h_upload_ptrs[i]  = static_cast<uint8_t*>(encoded_buffers.back().data());
+    h_upload_sizes[i] = static_cast<uint32_t>(page.total_size());
+  }
+
+  return {std::move(encoded_buffers), std::move(h_upload_ptrs), std::move(h_upload_sizes)};
+}
+
+/**
+ * @brief Encode a batch of INT64 pages via the explicit SPLIT64 helper path.
+ */
+std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
+encode_split32_pages_helper(std::vector<int64_t*> const& h_gather_ptrs,
+                            std::vector<uint32_t> const& h_gather_counts,
+                            rmm::cuda_stream_view stream,
+                            bool debug_print)
+{
+  size_t const num_pages = h_gather_ptrs.size();
+
+  std::vector<rmm::device_buffer> encoded_buffers;
+  std::vector<uint8_t*> h_upload_ptrs(num_pages, nullptr);
+  std::vector<uint32_t> h_upload_sizes(num_pages, 0);
+  encoded_buffers.reserve(num_pages);
+
+  for (size_t i = 0; i < num_pages; ++i) {
+    if (h_gather_ptrs[i] == nullptr) { continue; }
+
+    uint32_t const count = h_gather_counts[i];
+    if (count == 0) { continue; }
+
+    auto page = encode_split32_page_helper(h_gather_ptrs[i], count, stream, debug_print);
+
+    encoded_buffers.push_back(std::move(page.device_blob));
+    h_upload_ptrs[i]  = static_cast<uint8_t*>(encoded_buffers.back().data());
+    h_upload_sizes[i] = static_cast<uint32_t>(page.total_size());
+  }
+
+  return {std::move(encoded_buffers), std::move(h_upload_ptrs), std::move(h_upload_sizes)};
+}
+
+/**
+ * @brief Encode a batch of INT64 pages via the explicit Native64 helper path.
+ */
+std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
+encode_native64_pages_helper(std::vector<int64_t*> const& h_gather_ptrs,
+                             std::vector<uint32_t> const& h_gather_counts,
+                             rmm::cuda_stream_view stream,
+                             bool debug_print)
+{
+  size_t const num_pages = h_gather_ptrs.size();
+
+  std::vector<rmm::device_buffer> encoded_buffers;
+  std::vector<uint8_t*> h_upload_ptrs(num_pages, nullptr);
+  std::vector<uint32_t> h_upload_sizes(num_pages, 0);
+  encoded_buffers.reserve(num_pages);
+
+  for (size_t i = 0; i < num_pages; ++i) {
+    if (h_gather_ptrs[i] == nullptr) { continue; }
+
+    uint32_t const count = h_gather_counts[i];
+    if (count == 0) { continue; }
+
+    auto page = encode_native64_page_helper(h_gather_ptrs[i], count, stream, debug_print);
 
     encoded_buffers.push_back(std::move(page.device_blob));
     h_upload_ptrs[i]  = static_cast<uint8_t*>(encoded_buffers.back().data());
@@ -429,38 +561,88 @@ encode_pages_impl(std::vector<T*> const& h_gather_ptrs,
 
 }  // namespace
 
+/**
+ * @brief Construct the explicit INT32 RAW32 FastLanes encoder.
+ */
 FastLanesInt32Encoder::FastLanesInt32Encoder(bool debug_print) : debug_print_(debug_print) {}
 
+/**
+ * @brief Encode a single INT32 page via the explicit RAW32 helper path.
+ */
 EncodedPageResult FastLanesInt32Encoder::encode_page(int32_t const* d_input,
                                                      uint32_t count,
                                                      rmm::cuda_stream_view stream)
 {
-  return encode_page_impl<int32_t>(d_input, count, stream, debug_print_);
+  return encode_scalar32_page_helper(d_input, count, stream, debug_print_);
 }
 
+/**
+ * @brief Encode batched INT32 pages via the explicit RAW32 helper path.
+ */
 std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
 FastLanesInt32Encoder::encode_pages(std::vector<int32_t*> const& h_gather_ptrs,
                                     std::vector<uint32_t> const& h_gather_counts,
                                     rmm::cuda_stream_view stream)
 {
-  return encode_pages_impl<int32_t>(h_gather_ptrs, h_gather_counts, stream, debug_print_);
+  return encode_scalar32_pages_helper(h_gather_ptrs, h_gather_counts, stream, debug_print_);
 }
 
-FastLanesInt64Encoder::FastLanesInt64Encoder(bool debug_print) : debug_print_(debug_print) {}
-
-EncodedPageResult FastLanesInt64Encoder::encode_page(int64_t const* d_input,
-                                                     uint32_t count,
-                                                     rmm::cuda_stream_view stream)
+/**
+ * @brief Construct the explicit INT64 SPLIT64 FastLanes encoder.
+ */
+FastLanesInt64Split32Encoder::FastLanesInt64Split32Encoder(bool debug_print)
+  : debug_print_(debug_print)
 {
-  return encode_page_impl<int64_t>(d_input, count, stream, debug_print_);
 }
 
+/**
+ * @brief Encode a single INT64 page via the explicit SPLIT64 helper path.
+ */
+EncodedPageResult FastLanesInt64Split32Encoder::encode_page(int64_t const* d_input,
+                                                            uint32_t count,
+                                                            rmm::cuda_stream_view stream)
+{
+  return encode_split32_page_helper(d_input, count, stream, debug_print_);
+}
+
+/**
+ * @brief Encode batched INT64 pages via the explicit SPLIT64 helper path.
+ */
 std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
-FastLanesInt64Encoder::encode_pages(std::vector<int64_t*> const& h_gather_ptrs,
-                                    std::vector<uint32_t> const& h_gather_counts,
-                                    rmm::cuda_stream_view stream)
+FastLanesInt64Split32Encoder::encode_pages(std::vector<int64_t*> const& h_gather_ptrs,
+                                           std::vector<uint32_t> const& h_gather_counts,
+                                           rmm::cuda_stream_view stream)
 {
-  return encode_pages_impl<int64_t>(h_gather_ptrs, h_gather_counts, stream, debug_print_);
+  return encode_split32_pages_helper(h_gather_ptrs, h_gather_counts, stream, debug_print_);
+}
+
+/**
+ * @brief Construct the explicit INT64 Native64 FastLanes encoder.
+ */
+FastLanesInt64NativeEncoder::FastLanesInt64NativeEncoder(bool debug_print)
+  : debug_print_(debug_print)
+{
+}
+
+/**
+ * @brief Encode a single INT64 page via the explicit Native64 helper path.
+ */
+EncodedPageResult FastLanesInt64NativeEncoder::encode_page(int64_t const* d_input,
+                                                           uint32_t count,
+                                                           rmm::cuda_stream_view stream)
+{
+  return encode_native64_page_helper(d_input, count, stream, debug_print_);
+}
+
+/**
+ * @brief Encode batched INT64 pages via the explicit Native64 helper path.
+ */
+std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
+FastLanesInt64NativeEncoder::encode_pages(std::vector<int64_t*> const& h_gather_ptrs,
+                                          std::vector<uint32_t> const& h_gather_counts,
+                                          rmm::cuda_stream_view stream)
+{
+  return encode_native64_pages_helper(h_gather_ptrs, h_gather_counts, stream, debug_print_);
 }
 
 }  // namespace cudf::io::parquet::detail::fastlanes_cudf

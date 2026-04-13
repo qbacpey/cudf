@@ -551,12 +551,23 @@ CUDF_HOST_DEVICE constexpr bool is_fastlanes_bitpack_split64_runtime_supported(
          is_fastlanes_bitpack_split64_supported_logical(logical_type);
 }
 
-CUDF_HOST_DEVICE constexpr bool is_fastlanes_delta_binary_supported(Type physical_type,
-                                                                    int32_t max_rep_level)
+CUDF_HOST_DEVICE constexpr bool is_fastlanes_delta_binary_runtime_supported(
+  Type physical_type,
+  cudf::type_id logical_type,
+  int32_t max_rep_level)
 {
   return is_fastlanes_flat_column(max_rep_level) &&
-         (physical_type == Type::INT32 || physical_type == Type::INT64);
+         physical_type == Type::INT64 &&
+         is_fastlanes_bitpack_split64_supported_logical(logical_type);
 }
+
+/**
+ * @brief Returns true when FASTLANES_DELTA_BINARY encode routing is activated.
+ *
+ * R2 intentionally keeps this disabled to prevent routing to a not-yet-implemented
+ * native64 writer payload path before R3 lands.
+ */
+CUDF_HOST_DEVICE constexpr bool is_fastlanes_delta_binary_encode_enabled() { return false; }
 
 CUDF_HOST_DEVICE constexpr uint32_t fastlanes_bitpack_kernel_masks()
 {
@@ -564,16 +575,30 @@ CUDF_HOST_DEVICE constexpr uint32_t fastlanes_bitpack_kernel_masks()
     encode_kernel_mask::FASTLANE_BITPACK_RAW, encode_kernel_mask::FASTLANE_BITPACK_SPLIT64);
 }
 
+CUDF_HOST_DEVICE constexpr uint32_t fastlanes_kernel_masks()
+{
+  return BitOr(fastlanes_bitpack_kernel_masks(), encode_kernel_mask::FASTLANES_DELTA_BINARY);
+}
+
 CUDF_HOST_DEVICE constexpr bool is_fastlanes_bitpack_mask(encode_kernel_mask kernel_mask)
 {
   return BitAnd(kernel_mask, fastlanes_bitpack_kernel_masks()) != 0;
 }
 
+CUDF_HOST_DEVICE constexpr bool is_fastlanes_mask(encode_kernel_mask kernel_mask)
+{
+  return BitAnd(kernel_mask, fastlanes_kernel_masks()) != 0;
+}
+
 CUDF_HOST_DEVICE constexpr Encoding fastlanes_encoding_for_mask(encode_kernel_mask kernel_mask)
 {
-  return BitAnd(kernel_mask, encode_kernel_mask::FASTLANE_BITPACK_SPLIT64) != 0
-           ? Encoding::FASTLANE_BITPACK_SPLIT64
-           : Encoding::FASTLANE_BITPACK_RAW;
+  if (BitAnd(kernel_mask, encode_kernel_mask::FASTLANES_DELTA_BINARY) != 0) {
+    return Encoding::FASTLANES_DELTA_BINARY;
+  }
+  if (BitAnd(kernel_mask, encode_kernel_mask::FASTLANE_BITPACK_SPLIT64) != 0) {
+    return Encoding::FASTLANE_BITPACK_SPLIT64;
+  }
+  return Encoding::FASTLANE_BITPACK_RAW;
 }
 
 CUDF_HOST_DEVICE constexpr size_t fastlanes_component_streams_for_mask(
@@ -585,6 +610,11 @@ CUDF_HOST_DEVICE constexpr size_t fastlanes_component_streams_for_mask(
   if (kernel_mask == encode_kernel_mask::FASTLANE_BITPACK_RAW) {
     // Defensive fallback: avoid under-allocation if an unexpected INT64 raw request slips through.
     return physical_type == Type::INT64 ? size_t{2} : size_t{1};
+  }
+
+  if (kernel_mask == encode_kernel_mask::FASTLANES_DELTA_BINARY) {
+    // Native64 payloads are single-stream 64-bit component data.
+    return size_t{1};
   }
 
   return size_t{0};
@@ -629,8 +659,12 @@ __device__ encode_kernel_mask data_encoding_for_col(EncColumnChunk const* chunk,
         return encode_kernel_mask::PLAIN;
       }
       case column_encoding::FASTLANES_DELTA_BINARY: {
-        if (is_fastlanes_delta_binary_supported(col_desc->physical_type, col_desc->max_rep_level)) {
-          return encode_kernel_mask::FASTLANES_DELTA_BINARY;
+        auto const leaf_type = col_desc->leaf_column->type().id();
+        if (is_fastlanes_delta_binary_runtime_supported(
+              col_desc->physical_type, leaf_type, col_desc->max_rep_level)) {
+          return is_fastlanes_delta_binary_encode_enabled()
+                   ? encode_kernel_mask::FASTLANES_DELTA_BINARY
+                   : encode_kernel_mask::DELTA_BINARY;
         }
         // Fallback to DELTA_BINARY_PACKED if constraints not met
         return encode_kernel_mask::DELTA_BINARY;
@@ -3893,6 +3927,8 @@ void maybe_log_fastlanes_int32_vector_boundaries(rmm::device_uvector<uint32_t> c
 template <typename HeaderT>
 void validate_fastlanes_pre_delta_policy(encode_kernel_mask kernel_mask, HeaderT const& hdr)
 {
+  if (!is_fastlanes_mask(kernel_mask)) { return; }
+
   auto const split64_mode =
     fastlanes_encoding_for_mask(kernel_mask) == Encoding::FASTLANE_BITPACK_SPLIT64;
   if (!fastlanes::is_pre_delta_valid_for_mode(split64_mode, hdr.pre_delta)) {
@@ -4005,7 +4041,7 @@ fastlanes_cudf::EncodedPageResult encode_fastlanes_int64_page(
   device_span<EncPage> pages,
   size_t page_idx,
   uint32_t num_values,
-  fastlanes_cudf::FastLanesInt64Encoder& encoder,
+  fastlanes_cudf::FastLanesInt64Split32Encoder& encoder,
   rmm::cuda_stream_view stream)
 {
   rmm::device_uvector<uint64_t> gather_buffer(num_values, stream);
@@ -4068,15 +4104,17 @@ void run_fastlanes_cpu_bitpack_encode(device_span<EncPage> pages,
   fastlanes_cpu_upload_buffers upload_buffers(pages.size());
 
   std::unique_ptr<fastlanes_cudf::FastLanesInt32Encoder> encoder_i32;
-  std::unique_ptr<fastlanes_cudf::FastLanesInt64Encoder> encoder_i64;
+  std::unique_ptr<fastlanes_cudf::FastLanesInt64Split32Encoder> encoder_i64;
 
   auto get_encoder_i32 = [&]() -> fastlanes_cudf::FastLanesInt32Encoder& {
     if (!encoder_i32) { encoder_i32 = std::make_unique<fastlanes_cudf::FastLanesInt32Encoder>(false); }
     return *encoder_i32;
   };
 
-  auto get_encoder_i64 = [&]() -> fastlanes_cudf::FastLanesInt64Encoder& {
-    if (!encoder_i64) { encoder_i64 = std::make_unique<fastlanes_cudf::FastLanesInt64Encoder>(false); }
+  auto get_encoder_i64 = [&]() -> fastlanes_cudf::FastLanesInt64Split32Encoder& {
+    if (!encoder_i64) {
+      encoder_i64 = std::make_unique<fastlanes_cudf::FastLanesInt64Split32Encoder>(false);
+    }
     return *encoder_i64;
   };
 

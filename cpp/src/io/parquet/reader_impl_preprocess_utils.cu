@@ -345,6 +345,7 @@ std::string encoding_to_string(Encoding encoding)
     case Encoding::BYTE_STREAM_SPLIT: return "BYTE_STREAM_SPLIT";
     case Encoding::FASTLANE_BITPACK_RAW: return "FASTLANE_BITPACK_RAW";
     case Encoding::FASTLANE_BITPACK_SPLIT64: return "FASTLANE_BITPACK_SPLIT64";
+    case Encoding::FASTLANES_DELTA_BINARY: return "FASTLANES_DELTA_BINARY";
     case Encoding::NUM_ENCODINGS:
     default: return "UNKNOWN(" + std::to_string(static_cast<int>(encoding)) + ")";
   }

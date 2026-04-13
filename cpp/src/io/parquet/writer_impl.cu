@@ -193,6 +193,22 @@ bool is_fastlanes_bitpack_supported_schema(
   return false;
 }
 
+/**
+ * @brief Validate FASTLANES_DELTA_BINARY schema compatibility in the writer front-end.
+ *
+ * R2 keeps native64 payload generation disabled, but user metadata validation for this encoding
+ * is enabled so requests are explicit and can be routed safely by runtime guards.
+ */
+bool is_fastlanes_delta_binary_supported_schema(
+  Type physical_type,
+  cudf::type_id leaf_type,
+  cuda::std::optional<LogicalType> const& logical_type,
+  std::optional<ConvertedType> const& converted_type)
+{
+  return physical_type == Type::INT64 &&
+         is_fastlanes_int64_schema_supported(leaf_type, logical_type, converted_type);
+}
+
 }  // namespace
 
 Compression to_parquet_compression(compression_type compression)
@@ -906,6 +922,22 @@ std::vector<schema_tree_node> construct_parquet_schema_tree(
                     s.type, s.leaf_column->type().id(), s.logical_type, s.converted_type)) {
                 CUDF_LOG_WARN(
                   "FASTLANE_BITPACK_SPLIT64 encoding is unsupported for this logical type; "
+                  "the requested encoding will be ignored");
+                return;
+              }
+              break;
+
+            case column_encoding::FASTLANES_DELTA_BINARY:
+              if (s.type != Type::INT64) {
+                CUDF_LOG_WARN(
+                  "FASTLANES_DELTA_BINARY encoding is only supported for INT64 physical "
+                  "columns; the requested encoding will be ignored");
+                return;
+              }
+              if (!is_fastlanes_delta_binary_supported_schema(
+                    s.type, s.leaf_column->type().id(), s.logical_type, s.converted_type)) {
+                CUDF_LOG_WARN(
+                  "FASTLANES_DELTA_BINARY encoding is unsupported for this logical type; "
                   "the requested encoding will be ignored");
                 return;
               }
