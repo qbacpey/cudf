@@ -929,10 +929,8 @@ void decode_delta_binary(cudf::detail::hostdevice_span<PageInfo> pages,
                          rmm::cuda_stream_view stream);
 
 /**
- * @brief Launches kernel for reading FASTLANE_BITPACK_RAW encoded column data stored in the pages
- *
- * This is a debug kernel that reads and pretty-prints the FastLanes page header
- * and encoded payload for round-trip verification.
+ * @brief Launches kernels for reading FastLanes encoded column data stored in pages.
+ * This dispatcher handles RAW32, SPLIT64, and NATIVE64 FastLanes page encodings.
  *
  * @param[in,out] pages All pages to be decoded
  * @param[in] chunks All chunks to be decoded
@@ -953,7 +951,7 @@ void decode_fastlanes_binary(cudf::detail::hostdevice_span<PageInfo> pages,
                              rmm::cuda_stream_view stream);
 
 /**
- * @brief Launches dedicated debug kernel for FASTLANE_BITPACK_RAW pages.
+ * @brief Launches dedicated debug kernel for FastLanes pages.
  *
  * This path is intentionally separate from decode_fastlanes_binary so debug
  * dumping cannot change decode behavior. Runtime control is via

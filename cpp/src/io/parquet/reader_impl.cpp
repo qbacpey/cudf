@@ -300,6 +300,11 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
   }
 
   // launch FastLanes bitpack decoder
+  // TODO: Consider splitting this into separate decoders for different FastLanes encodings (RAW32,
+  // SPLIT64, NATIVE64). Instead of merging all FastLanes decoding into one kernel with internal
+  // branching, we can have separate kernels for each encoding type. This would allow us to optimize
+  // each kernel for its specific encoding layout and reduce divergent execution paths within the
+  // kernel, potentially improving performance.
   if (BitAnd(kernel_mask, decode_kernel_mask::FASTLANES_BINARY) != 0) {
     auto const fastlanes_stream = streams[s_idx++];
     decode_fastlanes_binary(subpass.pages,
@@ -312,13 +317,13 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
                             fastlanes_stream);
     // Explicit debug-dump launch is separated from decode so it cannot alter decode behavior.
     debug_decode_fastlanes_binary(subpass.pages,
-                           pass.chunks,
-                           num_rows,
-                           skip_rows,
-                           level_type_size,
-                           subpass_page_mask_span(),
-                           error_code.data(),
-                           fastlanes_stream);
+                                  pass.chunks,
+                                  num_rows,
+                                  skip_rows,
+                                  level_type_size,
+                                  subpass_page_mask_span(),
+                                  error_code.data(),
+                                  fastlanes_stream);
   }
 
   // launch byte stream split decoder

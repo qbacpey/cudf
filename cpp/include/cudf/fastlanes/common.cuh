@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -209,6 +210,23 @@ __device__ __host__ inline constexpr bool is_valid_bitwidth(uint8_t bitwidth)
 }
 
 /**
+ * @brief Return true if native64 bitwidth is in the supported range [1, 64].
+ */
+__device__ __host__ inline constexpr bool is_valid_native64_bitwidth(uint8_t bitwidth)
+{
+  return bitwidth >= 1 && bitwidth <= 64;
+}
+
+/**
+ * @brief External FastLanes decode/validation mode selected by parquet page encoding.
+ */
+enum class ExternalPageMode : uint8_t {
+  RAW32,
+  SPLIT64,
+  NATIVE64,
+};
+
+/**
  * @brief Default PRE_DELTA policy by external FastLanes mode.
  */
 __device__ __host__ inline constexpr bool default_pre_delta_for_mode(bool split64_mode)
@@ -313,10 +331,10 @@ struct PageHeader {
       throw std::invalid_argument("FastLanes: padded_count must be multiple of 1024");
     }
 
-    std::vector<uint8_t> blob(header_size() + body_sz);
-
-    // Zero entire header first
-    std::memset(blob.data(), 0, header_size());
+    if (body_sz > std::numeric_limits<size_t>::max() - header_size()) {
+      throw std::invalid_argument("FastLanes: encoded body size is too large");
+    }
+    std::vector<uint8_t> blob(header_size() + body_sz, uint8_t{0});
 
     // Write fields
     blob[OFFSET_COMPONENT_BW_LOW]  = bw;
@@ -368,8 +386,10 @@ struct PageHeader {
       throw std::invalid_argument("FastLanes: padded_count must be multiple of 1024");
     }
 
-    std::vector<uint8_t> blob(header_size() + body_sz);
-    std::memset(blob.data(), 0, header_size());
+    if (body_sz > std::numeric_limits<size_t>::max() - header_size()) {
+      throw std::invalid_argument("FastLanes: encoded body size is too large");
+    }
+    std::vector<uint8_t> blob(header_size() + body_sz, uint8_t{0});
 
     blob[OFFSET_PRE_DELTA]         = static_cast<uint8_t>(pre_delta ? 1 : 0);
     blob[OFFSET_RESERVED_FLAGS]    = 0;
@@ -385,6 +405,59 @@ struct PageHeader {
     std::memcpy(blob.data() + OFFSET_MIN_VALUE_HIGH_BITS, &min_val_high_bits, sizeof(uint32_t));
 
     // Copy encoded body after header
+    if (body_sz > 0 && encoded_body != nullptr) {
+      std::memcpy(blob.data() + header_size(), encoded_body, body_sz);
+    }
+
+    return blob;
+  }
+
+  /**
+   * @brief Serialize a native64 page header and encoded body.
+   */
+  static std::vector<uint8_t> serialize_native64(uint8_t bw,
+                                                 uint32_t orig_count,
+                                                 uint32_t pad_count,
+                                                 uint64_t min_val_bits,
+                                                 const uint8_t* encoded_body,
+                                                 size_t body_sz,
+                                                 bool pre_delta =
+                                                   default_pre_delta_for_mode(false))
+  {
+    if (!is_valid_native64_bitwidth(bw)) {
+      throw std::invalid_argument("FastLanes: native64 bitwidth must be in [1, 64]");
+    }
+    if (!is_pre_delta_valid_for_mode(false, pre_delta)) {
+      throw std::invalid_argument("FastLanes: NATIVE64 mode requires PRE_DELTA=true");
+    }
+    if (pad_count < orig_count) {
+      throw std::invalid_argument("FastLanes: padded_count must be >= original_count");
+    }
+    if (pad_count % VECTOR_SIZE != 0 && pad_count != 0) {
+      throw std::invalid_argument("FastLanes: padded_count must be multiple of 1024");
+    }
+
+    if (body_sz > std::numeric_limits<size_t>::max() - header_size()) {
+      throw std::invalid_argument("FastLanes: encoded body size is too large");
+    }
+    std::vector<uint8_t> blob(header_size() + body_sz, uint8_t{0});
+
+    blob[OFFSET_PRE_DELTA]         = static_cast<uint8_t>(pre_delta ? 1 : 0);
+    blob[OFFSET_RESERVED_FLAGS]    = 0;
+    blob[OFFSET_COMPONENT_BW_LOW]  = bw;
+    blob[OFFSET_COMPONENT_BW_HIGH] = 0;
+
+    std::memcpy(blob.data() + OFFSET_ORIGINAL_COUNT, &orig_count, sizeof(uint32_t));
+    std::memcpy(blob.data() + OFFSET_PADDED_COUNT, &pad_count, sizeof(uint32_t));
+
+    uint32_t body_sz_u32 = static_cast<uint32_t>(body_sz);
+    std::memcpy(blob.data() + OFFSET_BODY_SIZE, &body_sz_u32, sizeof(uint32_t));
+
+    auto const min_val_low_bits  = static_cast<uint32_t>(min_val_bits);
+    auto const min_val_high_bits = static_cast<uint32_t>(min_val_bits >> 32);
+    std::memcpy(blob.data() + OFFSET_MIN_VALUE_LOW_BITS, &min_val_low_bits, sizeof(uint32_t));
+    std::memcpy(blob.data() + OFFSET_MIN_VALUE_HIGH_BITS, &min_val_high_bits, sizeof(uint32_t));
+
     if (body_sz > 0 && encoded_body != nullptr) {
       std::memcpy(blob.data() + header_size(), encoded_body, body_sz);
     }
@@ -444,6 +517,11 @@ struct PageHeader {
            is_valid_bitwidth(component_bitwidth_high);
   }
 
+  __device__ __host__ constexpr bool has_valid_native64_mode_metadata() const
+  {
+    return is_valid_native64_bitwidth(component_bitwidth_low) && component_bitwidth_high == 0;
+  }
+
   __device__ __host__ constexpr bool has_valid_common_metadata() const
   {
     if (padded_count < original_count) { return false; }
@@ -458,6 +536,28 @@ struct PageHeader {
       if (!has_valid_split64_mode_metadata()) { return 0; }
       return encoded_size_bytes(padded_count, component_bitwidth_low) +
              encoded_size_bytes(padded_count, component_bitwidth_high);
+    }
+
+    if (!has_valid_raw_mode_metadata()) { return 0; }
+    return encoded_size_bytes(padded_count, component_bitwidth_low);
+  }
+
+  /**
+   * @brief Return the expected payload size in bytes for an explicit external mode.
+   */
+  __device__ __host__ constexpr size_t expected_body_size_bytes(ExternalPageMode mode) const
+  {
+    if (padded_count == 0) { return 0; }
+
+    if (mode == ExternalPageMode::SPLIT64) {
+      if (!has_valid_split64_mode_metadata()) { return 0; }
+      return encoded_size_bytes(padded_count, component_bitwidth_low) +
+             encoded_size_bytes(padded_count, component_bitwidth_high);
+    }
+
+    if (mode == ExternalPageMode::NATIVE64) {
+      if (!has_valid_native64_mode_metadata()) { return 0; }
+      return encoded_size_bytes(padded_count, component_bitwidth_low);
     }
 
     if (!has_valid_raw_mode_metadata()) { return 0; }
@@ -482,21 +582,34 @@ struct PageHeader {
  * @brief Validate a decoded FastLanes header for an externally selected decode mode.
  */
 __device__ __host__ inline constexpr bool is_valid_for_external_mode(PageHeader const& header,
-                                                                     bool split64_mode)
+                                                                     ExternalPageMode mode)
 {
   if (!header.has_valid_common_metadata()) { return false; }
+  auto const split64_mode = mode == ExternalPageMode::SPLIT64;
   if (!is_pre_delta_valid_for_mode(split64_mode, header.pre_delta)) { return false; }
 
-  if (split64_mode) {
+  if (mode == ExternalPageMode::SPLIT64) {
     if (!header.has_valid_split64_mode_metadata()) { return false; }
+  } else if (mode == ExternalPageMode::NATIVE64) {
+    if (!header.has_valid_native64_mode_metadata()) { return false; }
   } else {
     if (!header.has_valid_raw_mode_metadata()) { return false; }
   }
 
-  auto const expected_body = header.expected_body_size_bytes(split64_mode);
+  auto const expected_body = header.expected_body_size_bytes(mode);
   if (header.body_size < expected_body) { return false; }
 
   return true;
+}
+
+/**
+ * @brief Backward-compatible wrapper for raw/split mode validation.
+ */
+__device__ __host__ inline constexpr bool is_valid_for_external_mode(PageHeader const& header,
+                                                                     bool split64_mode)
+{
+  return is_valid_for_external_mode(
+    header, split64_mode ? ExternalPageMode::SPLIT64 : ExternalPageMode::RAW32);
 }
 
 }  // namespace fastlanes

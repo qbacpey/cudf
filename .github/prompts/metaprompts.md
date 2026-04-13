@@ -218,46 +218,82 @@ START NOW
 
 MY OBJECTIVE BEGIN
 
-Here is a comprehensive, structured prompt designed specifically to be fed into a planning LLM. It gives the LLM all the context, constraints, and explicit step-by-step tasks it needs to correctly refactor both the encoding and decoding paths.
+Now I have as an agent to do some modification to the code about impl the Native64 enc/dec path for FastLanes. It works. this is the short report about it "Implemented Round 3-4 core changes and ran them on remote (fng01) under your remote-working contract, not on local no-GPU.
 
-***
+What is now implemented
 
-**Copy and paste the following prompt to your Planning LLM:**
+- Native64 writer path is implemented and wired through explicit FastLanes routes.
+- Decoder is split into three explicit kernels with strict encoding checks:
+  - RAW32
+  - SPLIT64
+  - NATIVE64
+- Header metadata/validation now supports native64 mode explicitly.
+- Reserved page sizing now accounts for native64 worst-case padding and 64-bit payload width, fixing the reserved-size overflow failures.
+- Added/kept doc comments on the new/updated public/header-level FastLanes functions and mode helpers.
 
-```text
-# SYSTEM ARCHITECTURE & REFACTORING PLAN: Parquet FastLanes Encoders & Decoders
+Changed files
 
-## Context & The Problem
-We need to refactor the cuDF Parquet FastLanes integration to eliminate "Template Fatigue." Currently, the encoder implementation (`fastlanes_encode.cu/.cuh`) uses heavy templating (`encode_page_impl<T>`) to mash together completely different execution models. The decoder is similarly overloaded. 
+- common.cuh
+- fastlanes_encode.cuh
+- fastlanes.cu
+- page_enc.cu
+- page_fastlanes_decode.cu
+- parquet_gpu.hpp
 
-We are introducing a new GPU-native 64-bit encoding, which means we now have three fundamentally distinct execution paths that must be explicitly separated in both the encoding and decoding stages:
+Important R3 policy note
 
-1. **32-bit CPU Path:** Uses `Encoding::FASTLANE_BITPACK_RAW`. Data is encoded on the CPU. The kernel does not apply a delta internally.
-2. **64-bit Split32 CPU Path:** Uses `Encoding::FASTLANE_BITPACK_SPLIT64`. Data is encoded on the CPU by splitting 64-bit integers into two 32-bit streams.
-3. **64-bit Native GPU Path (NEW):** Uses `Encoding::FASTLANES_DELTA_BINARY`. Data is encoded entirely on the GPU. The encoding/decoding kernels handle the delta internally.
+- I initially enabled broad INT64 V2 fallback to FASTLANES_DELTA_BINARY.
+- That caused PARQUET_TEST regressions and one very long legacy path.
+- Final state keeps explicit FastLanes/native64 routing active and fixes R3/R4 implementation, but restores generic V2 INT64 fallback to DELTA_BINARY_PACKED so full ctest is green.
 
-## Your Objective
-Please create a detailed implementation plan and write the code to cleanly separate these three paths. 
+Remote validation summary (fng01)
 
-### Intent 1: Refactor the Public Encoder API (`fastlanes_encode.cuh`)
-- **Intent:** Make the API explicitly reflect the three execution paths. 
-- **Action:** Keep `FastLanesInt32Encoder`. Rename the existing 64-bit encoder to `FastLanesInt64Split32Encoder`. Create a new `FastLanesInt64NativeEncoder`. All three should share the same public method signatures (`encode_page` and `encode_pages`).
+- Remote context verified: qchen on fng01.
+- Build ran via build.sh as required:
+  - PARALLEL_LEVEL=4 build.sh libcudf
+  - PARALLEL_LEVEL=4 build.sh libcudf tests
+- WRITER_GTEST_BIN resolved to:
+  - /home/qchen/04_GPUFileFormat-cudf/cudf-fastlane/cpp/build/gtests/PARQUET_TEST
+- Focused previously failing PARQUET_TEST filter: all 6 passed.
+- Writer filter ParquetWriterTest.UserRequestedEncodings: passed.
+- PARQUET_FASTLANES_TEST filter (native64 generated + bw37 + int64/uint64 cpu enc): 30 passed.
+- Full ctest checkpoint:
+  - 100% tests passed, 0 failed out of 114
+  - Total Test time (real): 262.78 sec
 
-### Intent 2: De-template the Encoder Implementation (`fastlanes_encode.cu`)
-- **Intent:** Remove the generic `encode_page_impl<T>` and `encode_pages_impl<T>`. Stop using `if constexpr` to switch between CPU and GPU workflows.
-- **Action:** Create three dedicated, non-templated helper functions in the anonymous namespace for single-page and batch encoding. Map the three classes from Intent 1 directly to these specific helpers. 
+Remote contract report fields
 
-### Intent 3: Implement the Native64 GPU Encoder
-- **Intent:** The new `FASTLANES_DELTA_BINARY` path must be 100% GPU-accelerated. No input data should be downloaded to the host.
-- **Action:** Design the Native64 helper to use the `native64_generated` API. It must compute the minimum value (base bits) on the GPU, compute the maximum delta and bitwidth on the GPU (e.g., using Thrust/CUB), allocate the final device buffer (including space for the 128-byte header), pack the data on the GPU, and finally generate and copy the header from the CPU to the device buffer.
+- RUN_TAG used: r34_20260413_a
+- Search tool used for validation text search: grep -nE fallback (rg unavailable on remote)
+- Exact key commands executed:
+  - ssh qchen@fng01.lab.tuda.systems
+  - source ~/miniconda3/etc/profile.d/conda.sh
+  - conda activate cudf_dev
+  - export CPATH="$CONDA_PREFIX/include/rapids:$CONDA_PREFIX/include"
+  - PARALLEL_LEVEL=4 build.sh libcudf
+  - PARALLEL_LEVEL=4 build.sh libcudf tests
+  - gtests/PARQUET_TEST with focused 6-test filter
+  - WRITER_GTEST_BIN --gtest_filter=ParquetWriterTest.UserRequestedEncodings
+  - gtests/PARQUET_FASTLANES_TEST with R3/R4 filter
+  - ctest --output-on-failure --no-tests=error
+- Sentinel roundtrip final input path used:
+  - /home/qchen/04_GPUFileFormat-cudf/large_input/tpch1-nocomp-cudf.parquet
+- Sentinel output/log locations:
+  - /home/qchen/04_GPUFileFormat-cudf/parquet_io_shared/artifacts/cudf-fastlane/r34_20260413_a/tpch1-nocomp-cudf.roundtrip.parquet
+  - /home/qchen/04_GPUFileFormat-cudf/parquet_io_shared/reports/cudf-fastlane/r34_20260413_a/sentinel_roundtrip.log
+- Sentinel status:
+  - executed, but validation failed (dtype mismatch)
+  - alternate input 0003-cudf-DELTA.parquet hit CUDA OOM during write
+- Archive step executed: No
+- Small reports sync executed:
+  - sync_parquet_io_shared_small.sh pull
+  - Result: Done: mode=pull dry_run=false
 
-### Intent 4: Separate the Decode Kernels (`page_decode.cuh` / `fastlanes.cu`)
-- **Intent:** Currently, the decode dispatcher launches an INT32 and an INT64 kernel, which try to dynamically figure out what to do. We want a strict 1-to-1 mapping between the three encoding types and their respective CUDA kernels.
-- **Action:** 
-  1. Refactor the page validation logic (`setup_and_validate_fastlanes_page`) to properly identify and route `FASTLANE_BITPACK_RAW`, `FASTLANE_BITPACK_SPLIT64`, and `FASTLANES_DELTA_BINARY` based on the page metadata.
-  2. Create three explicitly named `__global__` decode kernels, one for each encoding type.
-  3. Implement the new Native64 decode kernel using the `native64_generated` decoding API. Remember that this specific format handles the delta internally, unlike the raw bitpack.
-  4. Update the host launch function (`decode_fastlanes_binary`) to dispatch to all three kernels, relying on the internal kernel validation to allow threads to early-exit if the page doesn't match their designated encoding.
+If you want, next I can do one of these:
+1. Re-enable broader default INT64/UINT64 native64 activation behind a tighter eligibility gate and lock it with tests so ctest remains green.
+2. Investigate and fix the sentinel dtype-mismatch roundtrip failure so the sentinel step also passes, not just executes.
+" 
 
-Please analyze this architecture, confirm your understanding of the separation of concerns, and then provide the refactored code for both the encoder and decoder.
+BUT, there are may place in the code are not clean and may need refactor, and also there are some debug code that may not be needed. So I add many TODO: in the code for future refactor. Now I hope you can summarize and run though all the TODO introduce by me, and give me a clear plan for future refactor.
+
 MY OBJECTIVE END

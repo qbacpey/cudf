@@ -32,6 +32,14 @@
 #include <cooperative_groups.h>
 
 #include <iostream>
+#include <string>
+
+namespace native64_generated {
+[[nodiscard]] std::string cuda_error(cudaError_t status, char const* operation);
+}  // namespace native64_generated
+// TODO: Consider DO NOT DIRECTLY include generated code in this file, 
+// and instead provide a more explicit API in a header that abstracts away the generated code details. 
+#include <cudf/fastlanes/native64_cuda_kernels.inl>
 
 namespace cudf::io::parquet::detail {
 
@@ -70,6 +78,8 @@ __device__ inline bool setup_and_validate_fastlanes_page(
   size_t num_rows,
   cudf::device_span<bool const> page_mask,
   Type expected_physical_type,
+  Encoding expected_encoding,
+  fastlanes::ExternalPageMode expected_mode,
   int lane,
   kernel_error::pointer error_code,
   fastlanes::PageHeader* fastlanes_header,
@@ -123,20 +133,11 @@ __device__ inline bool setup_and_validate_fastlanes_page(
     return fastlanes_set_decode_error(lane, error_code, decode_error::INVALID_DATA_TYPE);
   }
 
-  auto const is_split64_page_encoding = s->page.encoding == Encoding::FASTLANE_BITPACK_SPLIT64;
-  auto const is_raw_page_encoding     = s->page.encoding == Encoding::FASTLANE_BITPACK_RAW;
+  if (s->page.encoding != expected_encoding) { return false; }
+
   auto const header = fastlanes::PageHeader::deserialize(s->data_start);
 
-  if (!is_split64_page_encoding && !is_raw_page_encoding) {
-    return fastlanes_set_decode_error(lane, error_code, decode_error::UNSUPPORTED_ENCODING);
-  }
-
-  if (is_split64_page_encoding != (expected_physical_type == Type::INT64)) {
-    return fastlanes_set_decode_error(lane, error_code, decode_error::INVALID_DATA_TYPE);
-  }
-
-  auto const split64_mode = is_split64_page_encoding;
-  if (!fastlanes::is_valid_for_external_mode(header, split64_mode)) {
+  if (!fastlanes::is_valid_for_external_mode(header, expected_mode)) {
     return fastlanes_set_decode_error(lane, error_code, decode_error::INVALID_DATA_TYPE);
   }
 
@@ -204,10 +205,13 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_debug_block_size)
 
     auto const fl_hdr               = fastlanes::PageHeader::deserialize(s->data_start);
     auto const is_split64_page_mode = s->page.encoding == Encoding::FASTLANE_BITPACK_SPLIT64;
+    auto const is_native64_page_mode = s->page.encoding == Encoding::FASTLANES_DELTA_BINARY;
     info->bitwidth       = fl_hdr.component_bitwidth_low;
     info->cast_mode      = 0;
-    info->layout_mode    = static_cast<uint8_t>(is_split64_page_mode ? 2 : 1);
-    info->bitwidth_mode  = static_cast<uint8_t>(is_split64_page_mode ? 2 : 1);
+    // TODO: Consider in this place also use Encoding::* to distinguish between RAW32/SPLIT64/NATIVE64
+    //  instead of relying on bitwidth/cast_mode, which are more about the value encoding details than the overall page layout.
+    info->layout_mode    = static_cast<uint8_t>(is_native64_page_mode ? 3 : (is_split64_page_mode ? 2 : 1));
+    info->bitwidth_mode  = static_cast<uint8_t>(is_native64_page_mode ? 3 : (is_split64_page_mode ? 2 : 1));
     info->pre_delta      = fl_hdr.pre_delta;
     info->component_bitwidth_low  = fl_hdr.component_bitwidth_low;
     info->component_bitwidth_high = fl_hdr.component_bitwidth_high;
@@ -238,7 +242,7 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_debug_block_size)
 // ---------------------------------------------------------------------------
 template <typename level_t>
 CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
-  decode_fastlanes_int32_kernel(PageInfo* pages,
+  decode_fastlanes_raw32_kernel(PageInfo* pages,
                                 device_span<ColumnChunkDesc const> chunks,
                                 size_t min_row,
                                 size_t num_rows,
@@ -265,6 +269,8 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
                                                    num_rows,
                                                    page_mask,
                                                    Type::INT32,
+                                                   Encoding::FASTLANE_BITPACK_RAW,
+                                                   fastlanes::ExternalPageMode::RAW32,
                                                    lane,
                                                    error_code,
                                                    &fastlanes_header,
@@ -336,12 +342,12 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
 // ---------------------------------------------------------------------------
 template <typename level_t>
 CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
-  decode_fastlanes_int64_kernel(PageInfo* pages,
-                                device_span<ColumnChunkDesc const> chunks,
-                                size_t min_row,
-                                size_t num_rows,
-                                cudf::device_span<bool const> page_mask,
-                                kernel_error::pointer error_code)
+  decode_fastlanes_split64_kernel(PageInfo* pages,
+                                  device_span<ColumnChunkDesc const> chunks,
+                                  size_t min_row,
+                                  size_t num_rows,
+                                  cudf::device_span<bool const> page_mask,
+                                  kernel_error::pointer error_code)
 {
   __shared__ uint32_t decoded_vec_low[fastlanes_vector_size];
   __shared__ uint32_t decoded_vec_high[fastlanes_vector_size];
@@ -365,6 +371,8 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
                                                    num_rows,
                                                    page_mask,
                                                    Type::INT64,
+                                                   Encoding::FASTLANE_BITPACK_SPLIT64,
+                                                   fastlanes::ExternalPageMode::SPLIT64,
                                                    lane,
                                                    error_code,
                                                    &fastlanes_header,
@@ -373,9 +381,6 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
   }
 
   auto const* payload_bytes = fastlanes::PageHeader::payload_ptr(s->data_start);
-  // Current INT64 decode expects split32 component streams from header metadata.
-  // TODO(native64): if NATIVE64 layout is added, dispatch to a dedicated native64
-  // kernel path that decodes one 64-bit stream instead of low/high split streams.
   auto const packed_words_per_vector_low  = static_cast<uint32_t>(fastlanes_header.component_bitwidth_low) * 32;
   auto const packed_words_per_vector_high = static_cast<uint32_t>(fastlanes_header.component_bitwidth_high) * 32;
   auto const min_value_low_64             = fastlanes_header.min_value_low_bits;
@@ -427,6 +432,107 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
       auto const value_bits =
         (static_cast<uint64_t>(high_bits) << 32) | static_cast<uint64_t>(low_bits);
       auto const signed_val = fastlanes::u64_bits_to_int64(value_bits);
+
+      if (dst_pos >= 0 && dst_pos < s->num_rows) { output_base_64[dst_pos] = signed_val; }
+    }
+
+    block.sync();
+    value_base_idx += values_in_vector;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Native64 Kernel: one thread-block (one warp) per page
+// ---------------------------------------------------------------------------
+template <typename level_t>
+CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
+  decode_fastlanes_native64_kernel(PageInfo* pages,
+                                   device_span<ColumnChunkDesc const> chunks,
+                                   size_t min_row,
+                                   size_t num_rows,
+                                   cudf::device_span<bool const> page_mask,
+                                   kernel_error::pointer error_code)
+{
+  __shared__ uint64_t decoded_vec[fastlanes_vector_size];
+  __shared__ uint64_t packed_vec_aligned[fastlanes_vector_size];
+  __shared__ __align__(16) page_state_s state_g;
+
+  page_state_s* const s = &state_g;
+  int const page_idx    = cg::this_grid().block_rank();
+  auto const block      = cg::this_thread_block();
+  int const lane        = static_cast<int>(block.thread_rank());
+  [[maybe_unused]] null_count_back_copier _{s, lane};
+
+  fastlanes::PageHeader fastlanes_header{};
+  uint32_t total_value_count = 0;
+  if (!setup_and_validate_fastlanes_page<level_t>(s,
+                                                   pages,
+                                                   page_idx,
+                                                   chunks,
+                                                   min_row,
+                                                   num_rows,
+                                                   page_mask,
+                                                   Type::INT64,
+                                                   Encoding::FASTLANES_DELTA_BINARY,
+                                                   fastlanes::ExternalPageMode::NATIVE64,
+                                                   lane,
+                                                   error_code,
+                                                   &fastlanes_header,
+                                                   &total_value_count)) {
+    return;
+  }
+
+  constexpr uint32_t native64_lanes_per_vector = 16;
+  auto const* payload_bytes                     = fastlanes::PageHeader::payload_ptr(s->data_start);
+  auto const packed_words_per_vector =
+    static_cast<uint32_t>(fastlanes::encoded_size_bytes(
+      fastlanes_vector_size, fastlanes_header.component_bitwidth_low) /
+                         sizeof(uint64_t));
+  auto const base_bits = fastlanes_header.min_value_bits();
+
+  auto const leaf_level_idx = s->col.max_nesting_depth - 1;
+  auto* const output_base_64 = reinterpret_cast<int64_t*>(s->nesting_info[leaf_level_idx].data_out);
+
+  uint32_t value_base_idx = 0;
+  while (value_base_idx < total_value_count) {
+    auto const vector_index = value_base_idx / fastlanes_vector_size;
+    auto const remaining_value_count = total_value_count - value_base_idx;
+    auto const values_in_vector =
+      remaining_value_count < fastlanes_vector_size ? remaining_value_count : fastlanes_vector_size;
+
+    auto const* vector_input_bytes =
+      payload_bytes + static_cast<size_t>(vector_index) *
+                        static_cast<size_t>(packed_words_per_vector) * sizeof(uint64_t);
+    // TODO: Wrong impl: In this place only load one vector, while for the API provided by the
+    // fastlane native64 header It process `constexpr uint32_t kVectorsPerBlock = kThreadsPerBlock /
+    // kLanesPerVector;` vectors per block, which means one iteration of the while loop should load
+    // `kVectorsPerBlock` vectors, and the generated decode code should also be called for
+    // `kVectorsPerBlock` vectors accordingly. Need to align this with the expected usage of the
+    // generated code, and also refer to the existing test coverage in
+    // `cpp/tests/io/parquet_fastlanes_native64_generated_test.cu` for examples on how the generated
+    // code is expected to be called. So must use the API exposed in `decode_by_bw_gpu_device_ptrs`
+    for (uint32_t w = lane; w < packed_words_per_vector; w += decode_fastlanes_block_size) {
+      auto const* b = vector_input_bytes + static_cast<size_t>(w) * sizeof(uint64_t);
+      packed_vec_aligned[w] =
+        (static_cast<uint64_t>(b[0])) | (static_cast<uint64_t>(b[1]) << 8) |
+        (static_cast<uint64_t>(b[2]) << 16) | (static_cast<uint64_t>(b[3]) << 24) |
+        (static_cast<uint64_t>(b[4]) << 32) | (static_cast<uint64_t>(b[5]) << 40) |
+        (static_cast<uint64_t>(b[6]) << 48) | (static_cast<uint64_t>(b[7]) << 56);
+    }
+    block.sync();
+
+    if (lane < native64_lanes_per_vector) {
+      native64_generated::decode_lane_by_bw_device_runtime(fastlanes_header.component_bitwidth_low,
+                                                            packed_vec_aligned,
+                                                            decoded_vec,
+                                                            static_cast<uint32_t>(lane),
+                                                            base_bits);
+    }
+    block.sync();
+
+    for (uint32_t i = lane; i < values_in_vector; i += decode_fastlanes_block_size) {
+      auto const dst_pos    = static_cast<int32_t>(value_base_idx + i) - s->first_row;
+      auto const signed_val = fastlanes::u64_bits_to_int64(decoded_vec[i]);
 
       if (dst_pos >= 0 && dst_pos < s->num_rows) { output_base_64[dst_pos] = signed_val; }
     }
@@ -497,20 +603,21 @@ void decode_fastlanes_binary(cudf::detail::hostdevice_span<PageInfo> pages,
 
   dim3 dim_block(decode_fastlanes_block_size, 1);
   dim3 dim_grid(pages.size(), 1);
-
+  // TODO: Need to use different decoding kernel, since decoding native64 page mode requires
+  // different input parameters and also different generated code to be called.
   if (level_type_size == 1) {
-    decode_fastlanes_int32_kernel<uint8_t><<<dim_grid, dim_block, 0, stream.value()>>>(
+    decode_fastlanes_raw32_kernel<uint8_t><<<dim_grid, dim_block, 0, stream.value()>>>(
       pages.device_ptr(), chunks, min_row, num_rows, page_mask, error_code);
-    // TODO(native64): replace this single INT64 split32 launch with layout-based dispatch
-    // (split32 vs native64) once INT64 header validation supports NATIVE64 pages.
-    decode_fastlanes_int64_kernel<uint8_t><<<dim_grid, dim_block, 0, stream.value()>>>(
+    decode_fastlanes_split64_kernel<uint8_t><<<dim_grid, dim_block, 0, stream.value()>>>(
+      pages.device_ptr(), chunks, min_row, num_rows, page_mask, error_code);
+    decode_fastlanes_native64_kernel<uint8_t><<<dim_grid, dim_block, 0, stream.value()>>>(
       pages.device_ptr(), chunks, min_row, num_rows, page_mask, error_code);
   } else {
-    decode_fastlanes_int32_kernel<uint16_t><<<dim_grid, dim_block, 0, stream.value()>>>(
+    decode_fastlanes_raw32_kernel<uint16_t><<<dim_grid, dim_block, 0, stream.value()>>>(
       pages.device_ptr(), chunks, min_row, num_rows, page_mask, error_code);
-    // TODO(native64): replace this single INT64 split32 launch with layout-based dispatch
-    // (split32 vs native64) once INT64 header validation supports NATIVE64 pages.
-    decode_fastlanes_int64_kernel<uint16_t><<<dim_grid, dim_block, 0, stream.value()>>>(
+    decode_fastlanes_split64_kernel<uint16_t><<<dim_grid, dim_block, 0, stream.value()>>>(
+      pages.device_ptr(), chunks, min_row, num_rows, page_mask, error_code);
+    decode_fastlanes_native64_kernel<uint16_t><<<dim_grid, dim_block, 0, stream.value()>>>(
       pages.device_ptr(), chunks, min_row, num_rows, page_mask, error_code);
   }
 }

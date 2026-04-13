@@ -563,11 +563,8 @@ CUDF_HOST_DEVICE constexpr bool is_fastlanes_delta_binary_runtime_supported(
 
 /**
  * @brief Returns true when FASTLANES_DELTA_BINARY encode routing is activated.
- *
- * R2 intentionally keeps this disabled to prevent routing to a not-yet-implemented
- * native64 writer payload path before R3 lands.
  */
-CUDF_HOST_DEVICE constexpr bool is_fastlanes_delta_binary_encode_enabled() { return false; }
+CUDF_HOST_DEVICE constexpr bool is_fastlanes_delta_binary_encode_enabled() { return true; }
 
 CUDF_HOST_DEVICE constexpr uint32_t fastlanes_bitpack_kernel_masks()
 {
@@ -976,10 +973,13 @@ CUDF_KERNEL void __launch_bounds__(128)
           // - Without this bound, page_g.max_data_size can under-reserve, and the later copy kernel
           //   would write past the allocated page buffer.
           //
-          // We intentionally use a conservative 32-bit bound per component stream.
-          // RAW mode reserves one stream, SPLIT64 mode reserves two streams.
+          // We intentionally use a conservative per-stream bound.
+          // RAW/SPLIT64 reserve up to 32 bits per component stream.
+          // NATIVE64 reserves up to 64 bits for a single stream.
           // TODO: tighten this reservation once we have page-level exact pre-size metadata.
-          constexpr uint8_t max_fastlanes_bitwidth = 32;
+          auto const max_fastlanes_bitwidth =
+            (column_data_encoding == encode_kernel_mask::FASTLANES_DELTA_BINARY) ? uint8_t{64}
+                                                                                   : uint8_t{32};
           auto const fastlanes_num_vectors =
             (static_cast<size_t>(page_g.num_leaf_values) + size_t{1023}) / size_t{1024};
           auto const fastlanes_component_streams =
@@ -988,7 +988,7 @@ CUDF_KERNEL void __launch_bounds__(128)
                                            max_fastlanes_bitwidth *
                                            fastlanes_component_streams / size_t{8};
           auto const fastlanes_reserved_size =
-            is_fastlanes_bitpack_mask(column_data_encoding)
+            is_fastlanes_mask(column_data_encoding)
               ? fastlanes::PageHeader::header_size() +
                   fastlanes_body_size
               : size_t{0};
@@ -2930,7 +2930,7 @@ CUDF_KERNEL void __launch_bounds__(block_size, 8)
   }
   __syncthreads();
 
-  if (not is_fastlanes_bitpack_mask(s->page.kernel_mask)) { return; }
+  if (not is_fastlanes_mask(s->page.kernel_mask)) { return; }
 
   if (t == 0) {
     uint8_t* dst       = s->cur;
@@ -3856,7 +3856,8 @@ void InitEncoderPages(device_2dspan<EncColumnChunk> chunks,
 }
 
 namespace {
-
+// TODO: Consider review all the implemntation and debugging code about fastlanes and move them to a
+// separate file if they are not needed by other code. 
 struct fastlanes_cpu_upload_buffers {
   explicit fastlanes_cpu_upload_buffers(size_t num_pages)
     : host_upload_ptrs(num_pages, nullptr), host_upload_sizes(num_pages, 0)
@@ -3940,7 +3941,7 @@ template <typename HeaderT>
 void maybe_log_fastlanes_encoded_scalar32(size_t page_idx,
                                           uint32_t chunk_id,
                                           uint32_t chunk_page_index,
-                                          bool split64_mode,
+                                          Encoding page_encoding,
                                           HeaderT const& hdr,
                                           fastlanes_cudf::EncodedPageResult const& result)
 {
@@ -3948,7 +3949,14 @@ void maybe_log_fastlanes_encoded_scalar32(size_t page_idx,
 
   auto const* payload_u32 = reinterpret_cast<uint32_t const*>(
     fastlanes::PageHeader::payload_ptr(result.host_blob.data()));
-  auto const page_mode_name = split64_mode ? "SPLIT64" : "RAW";
+  auto const page_mode_name = [&]() {
+    switch (page_encoding) {
+      case Encoding::FASTLANE_BITPACK_RAW: return "RAW32";
+      case Encoding::FASTLANE_BITPACK_SPLIT64: return "SPLIT64";
+      case Encoding::FASTLANES_DELTA_BINARY: return "NATIVE64";
+      default: return "UNKNOWN";
+    }
+  }();
   std::cout << "[FL ENCODED  ] page=" << page_idx << " chunk=" << chunk_id
             << " chunk_page=" << chunk_page_index << " mode=" << page_mode_name
             << " pre_delta=" << (hdr.pre_delta ? "true" : "false")
@@ -3968,7 +3976,7 @@ template <typename HeaderT>
 void maybe_log_fastlanes_encoded_split32(size_t page_idx,
                                          uint32_t chunk_id,
                                          uint32_t chunk_page_index,
-                                         bool split64_mode,
+                                         Encoding page_encoding,
                                          HeaderT const& hdr,
                                          fastlanes_cudf::EncodedPageResult const& result)
 {
@@ -3976,7 +3984,14 @@ void maybe_log_fastlanes_encoded_split32(size_t page_idx,
 
   auto const* payload_u32 = reinterpret_cast<uint32_t const*>(
     fastlanes::PageHeader::payload_ptr(result.host_blob.data()));
-  auto const page_mode_name = split64_mode ? "SPLIT64" : "RAW";
+  auto const page_mode_name = [&]() {
+    switch (page_encoding) {
+      case Encoding::FASTLANE_BITPACK_RAW: return "RAW32";
+      case Encoding::FASTLANE_BITPACK_SPLIT64: return "SPLIT64";
+      case Encoding::FASTLANES_DELTA_BINARY: return "NATIVE64";
+      default: return "UNKNOWN";
+    }
+  }();
   std::cout << "[FL ENCODED  ] page=" << page_idx << " chunk=" << chunk_id
             << " chunk_page=" << chunk_page_index << " mode=" << page_mode_name
             << " pre_delta=" << (hdr.pre_delta ? "true" : "false")
@@ -4054,6 +4069,23 @@ fastlanes_cudf::EncodedPageResult encode_fastlanes_int64_page(
                              stream);
 }
 
+fastlanes_cudf::EncodedPageResult encode_fastlanes_int64_native_page(
+  device_span<EncPage> pages,
+  size_t page_idx,
+  uint32_t num_values,
+  fastlanes_cudf::FastLanesInt64NativeEncoder& encoder,
+  rmm::cuda_stream_view stream)
+{
+  rmm::device_uvector<uint64_t> gather_buffer(num_values, stream);
+  gpuGatherSinglePageTyped<uint64_t, encode_block_size>
+    <<<1, encode_block_size, 0, stream.value()>>>(pages, page_idx, gather_buffer.data(), nullptr);
+  cudaStreamSynchronize(stream.value());
+
+  return encoder.encode_page(reinterpret_cast<int64_t const*>(gather_buffer.data()),
+                             num_values,
+                             stream);
+}
+
 void upload_fastlanes_results_and_launch(device_span<EncPage> pages,
                                          bool write_v2_headers,
                                          device_span<device_span<uint8_t const>> comp_in,
@@ -4092,35 +4124,43 @@ void upload_fastlanes_results_and_launch(device_span<EncPage> pages,
     write_v2_headers);
 }
 
-void run_fastlanes_cpu_bitpack_encode(device_span<EncPage> pages,
-                                      bool write_v2_headers,
-                                      device_span<device_span<uint8_t const>> comp_in,
-                                      device_span<device_span<uint8_t>> comp_out,
-                                      device_span<codec_exec_result> comp_results,
-                                      uint32_t fastlanes_kernel_mask_bits,
-                                      rmm::cuda_stream_view stream)
+void run_fastlanes_cpu_encode(device_span<EncPage> pages,
+                              bool write_v2_headers,
+                              device_span<device_span<uint8_t const>> comp_in,
+                              device_span<device_span<uint8_t>> comp_out,
+                              device_span<codec_exec_result> comp_results,
+                              uint32_t fastlanes_kernel_mask_bits,
+                              rmm::cuda_stream_view stream)
 {
   auto host_pages = copy_fastlanes_pages_to_host(pages, stream);
   fastlanes_cpu_upload_buffers upload_buffers(pages.size());
 
   std::unique_ptr<fastlanes_cudf::FastLanesInt32Encoder> encoder_i32;
-  std::unique_ptr<fastlanes_cudf::FastLanesInt64Split32Encoder> encoder_i64;
+  std::unique_ptr<fastlanes_cudf::FastLanesInt64Split32Encoder> encoder_i64_split32;
+  std::unique_ptr<fastlanes_cudf::FastLanesInt64NativeEncoder> encoder_i64_native;
 
   auto get_encoder_i32 = [&]() -> fastlanes_cudf::FastLanesInt32Encoder& {
     if (!encoder_i32) { encoder_i32 = std::make_unique<fastlanes_cudf::FastLanesInt32Encoder>(false); }
     return *encoder_i32;
   };
 
-  auto get_encoder_i64 = [&]() -> fastlanes_cudf::FastLanesInt64Split32Encoder& {
-    if (!encoder_i64) {
-      encoder_i64 = std::make_unique<fastlanes_cudf::FastLanesInt64Split32Encoder>(false);
+  auto get_encoder_i64_split32 = [&]() -> fastlanes_cudf::FastLanesInt64Split32Encoder& {
+    if (!encoder_i64_split32) {
+      encoder_i64_split32 = std::make_unique<fastlanes_cudf::FastLanesInt64Split32Encoder>(false);
     }
-    return *encoder_i64;
+    return *encoder_i64_split32;
+  };
+
+  auto get_encoder_i64_native = [&]() -> fastlanes_cudf::FastLanesInt64NativeEncoder& {
+    if (!encoder_i64_native) {
+      encoder_i64_native = std::make_unique<fastlanes_cudf::FastLanesInt64NativeEncoder>(false);
+    }
+    return *encoder_i64_native;
   };
 
   std::unordered_map<uint32_t, uint32_t> chunk_page_counters;
   for (size_t page_idx = 0; page_idx < pages.size(); ++page_idx) {
-    if (not is_fastlanes_bitpack_mask(host_pages[page_idx].kernel_mask)) { continue; }
+    if (not is_fastlanes_mask(host_pages[page_idx].kernel_mask)) { continue; }
 
     auto const chunk_id         = host_pages[page_idx].chunk_id;
     auto const chunk_page_index = chunk_page_counters[chunk_id]++;
@@ -4138,11 +4178,9 @@ void run_fastlanes_cpu_bitpack_encode(device_span<EncPage> pages,
       auto const hdr = fastlanes::PageHeader::deserialize(result.host_blob.data());
       validate_fastlanes_pre_delta_policy(host_pages[page_idx].kernel_mask, hdr);
 
-      auto const split64_mode =
-        fastlanes_encoding_for_mask(host_pages[page_idx].kernel_mask) ==
-        Encoding::FASTLANE_BITPACK_SPLIT64;
+      auto const page_encoding = fastlanes_encoding_for_mask(host_pages[page_idx].kernel_mask);
       maybe_log_fastlanes_encoded_scalar32(
-        page_idx, chunk_id, chunk_page_index, split64_mode, hdr, result);
+        page_idx, chunk_id, chunk_page_index, page_encoding, hdr, result);
 
       auto const encoded_blob_size = static_cast<uint32_t>(result.total_size());
       ensure_fastlanes_page_fits_reserved_size(page_idx, host_pages[page_idx], encoded_blob_size);
@@ -4157,17 +4195,26 @@ void run_fastlanes_cpu_bitpack_encode(device_span<EncPage> pages,
     } else if (type_info.physical_type == Type::INT64 &&
                (type_info.logical_type == cudf::type_id::INT64 ||
                 type_info.logical_type == cudf::type_id::UINT64)) {
-      auto result = encode_fastlanes_int64_page(
-        pages, page_idx, num_values, get_encoder_i64(), stream);
+      auto const encoding = fastlanes_encoding_for_mask(host_pages[page_idx].kernel_mask);
+
+      auto result = [&]() {
+        if (encoding == Encoding::FASTLANE_BITPACK_SPLIT64) {
+          return encode_fastlanes_int64_page(
+            pages, page_idx, num_values, get_encoder_i64_split32(), stream);
+        }
+        if (encoding == Encoding::FASTLANES_DELTA_BINARY) {
+          return encode_fastlanes_int64_native_page(
+            pages, page_idx, num_values, get_encoder_i64_native(), stream);
+        }
+        throw std::invalid_argument(
+          "FastLanes INT64 path only supports SPLIT64 and FASTLANES_DELTA_BINARY encodings");
+      }();
 
       auto const hdr = fastlanes::PageHeader::deserialize(result.host_blob.data());
       validate_fastlanes_pre_delta_policy(host_pages[page_idx].kernel_mask, hdr);
 
-      auto const split64_mode =
-        fastlanes_encoding_for_mask(host_pages[page_idx].kernel_mask) ==
-        Encoding::FASTLANE_BITPACK_SPLIT64;
       maybe_log_fastlanes_encoded_split32(
-        page_idx, chunk_id, chunk_page_index, split64_mode, hdr, result);
+        page_idx, chunk_id, chunk_page_index, encoding, hdr, result);
 
       auto const encoded_blob_size = static_cast<uint32_t>(result.total_size());
       ensure_fastlanes_page_fits_reserved_size(page_idx, host_pages[page_idx], encoded_blob_size);
@@ -4181,7 +4228,7 @@ void run_fastlanes_cpu_bitpack_encode(device_span<EncPage> pages,
       }
     } else {
       throw std::invalid_argument(
-        "FastLanes BitPacking supports selected INT32 and INT64 logical types in flat pages");
+        "FastLanes encoding supports selected INT32 and INT64 logical types in flat pages");
     }
   }
 
@@ -4209,8 +4256,8 @@ void EncodePages(device_span<EncPage> pages,
   // determine which kernels to invoke
   auto kernel_mask = cudf::detail::transform_reduce(
     pages.begin(), pages.end(), mask_tform{}, uint32_t{0}, cuda::std::bit_or<uint32_t>{}, stream);
-  auto constexpr fastlanes_kernel_mask_bits = fastlanes_bitpack_kernel_masks();
-  auto const has_fastlanes_bitpack          = (kernel_mask & fastlanes_kernel_mask_bits) != 0;
+  auto constexpr fastlanes_kernel_mask_bits = fastlanes_kernel_masks();
+  auto const has_fastlanes                  = (kernel_mask & fastlanes_kernel_mask_bits) != 0;
 
   // get the number of streams we need from the pool
   int nkernels = std::bitset<32>(kernel_mask).count();
@@ -4263,18 +4310,17 @@ void EncodePages(device_span<EncPage> pages,
     gpuEncodeDictPages<encode_block_size><<<num_pages, encode_block_size, 0, strm.value()>>>(
       pages, comp_in, comp_out, comp_results, write_v2_headers);
   }
+  // TODO: Try to have a different function for the fastlanes path instead of using the same
+  // gpuEncodePages kernel with a flag to indicate Current code path is a bit hard to follow with
+  // all the flags and conditions for different encoding modes. A separate function for fastlanes
+  // encoding might make it clearer and easier to maintain.
   // ========================================
-  // CPU FastLanes BitPacking Encoding Block
+  // CPU/GPU FastLanes encoding block (RAW32, SPLIT64, NATIVE64)
   // ========================================
-  if (has_fastlanes_bitpack) {
+  if (has_fastlanes) {
     auto const strm = streams[s_idx++];
-    run_fastlanes_cpu_bitpack_encode(pages,
-                                     write_v2_headers,
-                                     comp_in,
-                                     comp_out,
-                                     comp_results,
-                                     fastlanes_kernel_mask_bits,
-                                     strm);
+    run_fastlanes_cpu_encode(
+      pages, write_v2_headers, comp_in, comp_out, comp_results, fastlanes_kernel_mask_bits, strm);
   }
   cudf::detail::join_streams(streams, stream);
 }

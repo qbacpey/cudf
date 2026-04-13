@@ -116,10 +116,6 @@ class FastLanesInt64Split32Encoder {
 
 /**
  * @brief Native64 FastLanes encoder entry point for INT64 payloads.
- *
- * Native64 behavior is introduced in a staged rollout. In non-activation stages,
- * this class can surface explicit not-yet-enabled behavior instead of silently
- * falling back to SPLIT64.
  */
 class FastLanesInt64NativeEncoder {
  public:
