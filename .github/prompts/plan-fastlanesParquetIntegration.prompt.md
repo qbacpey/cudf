@@ -1,0 +1,270 @@
+## Plan: FastLanes Parquet Refactor Hard-Cutover
+
+Comprehensive staged plan to implement host/device API separation, encoder file split with namespace cleanup, and page-encoder batching refactor with strict parity constraints. This plan follows remote GPU execution constraints on fng01, uses small reversible micro-runs, enforces direct hard cutovers, and validates each run with build + PARQUET_TEST + PARQUET_FASTLANES_TEST.
+
+### Current Decisions Applied
+- Scope: comprehensive end-state plan (not only 3 minimal edits).
+- Compatibility: direct hard cutover (no temporary production aliases/wrappers).
+- Invariants: bit-for-bit payload parity, page-header parity, and no new per-page stream synchronizations.
+- Validation cadence: each micro-run runs libcudf build + full PARQUET_TEST + PARQUET_FASTLANES_TEST.
+- Milestone cadence: full libcudf ctest suite at end of phases 1, 2, and 3.
+- Namespace target: `cudf::io::parquet::detail::fastlanes::native64` for native64 internals.
+- A/B parity approach: dual-path test-only harness during phase 3; remove test-only legacy hooks at phase 3 close.
+
+### Execution Envelope (Remote Contract)
+1. Use existing terminal; verify hostname/user first.
+2. If local shell: ssh to qchen@fng01.lab.tuda.systems.
+3. Set remote env in order: source conda.sh -> conda activate cudf_dev -> export CPATH.
+4. Set CUDF_HOME from TARGET_BRANCH=fastlane-working: /home/qchen/04_GPUFileFormat-cudf/cudf-fastlane.
+5. Build from ${CUDF_HOME} using ${CUDF_HOME}/build.sh only.
+6. If /tmp pressure: set TMPDIR, mkdir -p TMPDIR, set PARALLEL_LEVEL=4, rerun build.sh.
+7. Symbol checks use rg -n; fallback to grep -nE if rg unavailable.
+8. Report each run with exact commands, paths, rg/grep mode, and archive status fields.
+
+### Dependency Graph
+- FL-P1-R1 -> FL-P1-R2 -> FL-P1-R3 -> Phase-1 Milestone
+- FL-P2-R1 -> FL-P2-R2 -> Phase-2 Milestone
+- FL-P3-R1 -> FL-P3-R2 -> FL-P3-R3 -> FL-P3-R4 -> Phase-3 Milestone
+- Parallelism: none for production edits (high coupling). Validation artifact summarization can run in parallel with non-blocking report generation.
+
+### Micro-Runs
+
+1. FL-P1-R1: Introduce Device Header Boundary
+- Goal: establish explicit device include boundary for native64 kernels.
+- Depends on: none.
+- Editable scope (allowlist):
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_device.cuh (new)
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_cuda_kernels.inl
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/native64_cuda.cu
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/page_fastlanes_decode.cu
+- Forbidden scope (denylist): page encode stage files, fastlanes algorithm files, non-parquet IO code.
+- Concrete edits:
+  - Create native64_device.cuh containing device/runtime dispatch declarations and include native64_cuda_kernels.inl at bottom.
+  - Replace direct .inl includes in translation units with native64_device.cuh.
+- Validation:
+  - build.sh libcudf
+  - build.sh libcudf tests
+  - cpp/build/gtests/PARQUET_TEST
+  - cpp/build/gtests/PARQUET_FASTLANES_TEST
+  - rg -n for direct native64_cuda_kernels.inl include sites (expect only via native64_device.cuh policy).
+- Acceptance criteria: compile/test green with no behavior change.
+- Rollback trigger: compile/link failures from missing symbols or include recursion.
+- Evidence: symbol/include diff summary + pass/fail counts.
+
+2. FL-P1-R2: Hard Rename Host API Files
+- Goal: rename host API header/source to host-oriented names.
+- Depends on: FL-P1-R1.
+- Editable scope:
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_cuda.cuh -> native64_host.hpp
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/native64_cuda.cu -> native64_host.cu
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/fastlanes.cu
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/tests/io/parquet_fastlanes_native64_generated_test.cu
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/CMakeLists.txt
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/tests/CMakeLists.txt
+- Forbidden scope: namespace cleanup, algorithm logic changes.
+- Concrete edits:
+  - Rename files and update all includes/source lists.
+  - Remove stale path references to native64_cuda.*.
+- Validation: same as run 1 + rg -n for native64_cuda.cuh/native64_cuda.cu leftovers.
+- Acceptance: no stale filenames, build/test green.
+- Rollback trigger: unresolved source path or link target mismatch in CMake.
+- Evidence: rename map + grep output + test results.
+
+3. FL-P1-R3: Rename Host Launch API Symbols
+- Goal: clarify host-launch semantics in native64 host API names.
+- Depends on: FL-P1-R2.
+- Editable scope:
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_host.hpp
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/native64_host.cu
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/fastlanes.cu
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/tests/io/parquet_fastlanes_native64_generated_test.cu
+- Forbidden scope: page encoder stage batching.
+- Concrete edits:
+  - Rename host-facing APIs to selected names: launch_native64_encode, launch_native64_decode, and keep derive_min_base_bits for min-derivation.
+  - Update all call sites and tests.
+- Validation: same as run 1 + rg -n for old API names.
+- Acceptance: symbol names migrated; parity tests unchanged.
+- Rollback trigger: ABI symbol lookup failures or test compile breaks.
+- Evidence: symbol rename table + test output.
+
+Phase 1 Milestone Gate
+- Commands:
+  - build.sh libcudf
+  - build.sh libcudf tests
+  - cpp/build && ctest --output-on-failure
+- Exit requirement: full libcudf ctest pass.
+
+4. FL-P2-R1: Hard Split fastlanes.cu into Algorithm Files
+- Goal: remove monolithic fastlanes.cu and split by algorithm/common concerns.
+- Depends on: Phase 1 milestone.
+- Editable scope:
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/fastlanes.cu (delete)
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_common.cu (new)
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_raw32.cu (new)
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_split64.cu (new)
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_native64.cu (new)
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/fastlanes_encode.cuh
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/CMakeLists.txt
+- Forbidden scope: page_enc batching refactor.
+- Concrete edits:
+  - Move shared helpers to encode_common.cu.
+  - Move algorithm bodies to raw32/split64/native64 source files.
+  - Keep behavior byte-identical and preserve existing class APIs.
+- Validation: same per-run test set + rg -n for deleted fastlanes.cu references.
+- Acceptance: no behavior regression; compile and tests pass.
+- Rollback trigger: missing symbols from split units or duplicate template definitions.
+- Evidence: moved symbol map + parity-focused test output.
+
+5. FL-P2-R2: Namespace Hard Cutover
+- Goal: remove fastlanes_cudf and floating native64_generated namespaces.
+- Depends on: FL-P2-R1.
+- Editable scope:
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/fastlanes_encode.cuh
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_common.cu
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_raw32.cu
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_split64.cu
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_native64.cu
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_device.cuh
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_host.hpp
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/native64_host.cu
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/page_fastlanes_decode.cu
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/page_enc_fastlanes_stage.cuh
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/tests/io/parquet_fastlanes_native64_generated_test.cu
+- Forbidden scope: changing decode algorithm semantics.
+- Concrete edits:
+  - Move to cudf::io::parquet::detail::fastlanes and fastlanes::native64 namespace hierarchy.
+  - Remove old namespace names without aliases.
+- Validation: per-run tests + rg -n for old namespaces.
+- Acceptance: old namespaces absent; build/tests green.
+- Rollback trigger: namespace lookup breaks in decode/encoder/tests.
+- Evidence: namespace replacement report + test results.
+
+Phase 2 Milestone Gate
+- Commands:
+  - build.sh libcudf
+  - build.sh libcudf tests
+  - cpp/build && ctest --output-on-failure
+- Exit requirement: full libcudf ctest pass.
+
+6. FL-P3-R1: Move Stage Implementation from Header to Source (No Logic Change)
+- Goal: convert page stage from header-implemented function to source implementation with declarations-only header.
+- Depends on: Phase 2 milestone.
+- Editable scope:
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/page_enc_fastlanes_stage.cuh (delete)
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/fastlanes_page_encoder.hpp (new)
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/fastlanes_page_encoder.cu (new)
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/page_enc.cu
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/CMakeLists.txt
+- Forbidden scope: batching semantics changes.
+- Concrete edits:
+  - Move current run_fastlanes_cpu_encode implementation into new .cu as-is.
+  - New .hpp keeps declarations only under cudf::io::parquet::detail.
+  - Update include/call site in page_enc.cu.
+- Validation: per-run tests.
+- Acceptance: pure relocation with parity preserved.
+- Rollback trigger: new TU link failure or include ordering break.
+- Evidence: move-only diff summary + test output.
+
+7. FL-P3-R2: Add Categorize Phase + Test-Only Legacy A/B Harness
+- Goal: add phase-4a categorize scaffolding and lock parity guardrails before behavior change.
+- Depends on: FL-P3-R1.
+- Editable scope:
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/fastlanes_page_encoder.cu
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/tests/io/parquet_fastlanes_test.cpp
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/tests/CMakeLists.txt (if new test file is needed)
+- Forbidden scope: switching to encode_pages batching yet.
+- Concrete edits:
+  - Introduce page categorization data structures and single-pass grouping by encoding mode.
+  - Add test-only A/B harness comparing reference path and refactor path outputs.
+- Validation: per-run tests with new A/B filters included in PARQUET_FASTLANES_TEST.
+- Acceptance: A/B tests pass with byte identity.
+- Rollback trigger: parity mismatch in headers/payloads.
+- Evidence: A/B test pass summary with mismatch count = 0.
+
+8. FL-P3-R3: Batch Encode + Remove In-Loop Syncs
+- Goal: implement phase-4b and phase-4c (batch encode + finalize kernels) and remove per-page synchronization bottleneck.
+- Depends on: FL-P3-R2.
+- Editable scope:
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/fastlanes_page_encoder.cu
+- Forbidden scope: unrelated parquet decode paths, Python layer.
+- Concrete edits:
+  - Replace per-page encode_page loop with grouped encode_pages calls.
+  - Keep one-time synchronization boundaries only where required between semantic phases.
+  - Preserve header validation and final kernel launches (gpuEncodePageLevels/gpuEncodeCpuPages).
+- Validation: per-run tests + rg -n sync audit to ensure in-loop cudaStreamSynchronize removal.
+- Acceptance: A/B parity retained, no in-loop syncs remain.
+- Rollback trigger: parity break or unsupported type regressions.
+- Evidence: sync-audit snippet + A/B test output.
+
+9. FL-P3-R4: Remove Test-Only Legacy Hooks and Finalize Clean Path
+- Goal: remove temporary test-only reference hooks after refactor is validated.
+- Depends on: FL-P3-R3.
+- Editable scope:
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/tests/io/parquet_fastlanes_test.cpp
+  - any temporary phase-3 test helper files introduced in FL-P3-R2
+- Forbidden scope: production behavior changes.
+- Concrete edits:
+  - Remove legacy test-only entry points while keeping parity assertions on final path.
+- Validation: per-run tests.
+- Acceptance: no temporary hooks remain; tests still green.
+- Rollback trigger: coverage drop or inability to prove parity on final path.
+- Evidence: cleanup diff + test pass summary.
+
+Phase 3 Milestone Gate
+- Commands:
+  - build.sh libcudf
+  - build.sh libcudf tests
+  - cpp/build && ctest --output-on-failure
+- Exit requirement: full libcudf ctest pass.
+
+### Relevant Files
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_host.hpp — host launch API declarations.
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_device.cuh — device/runtime dispatch boundary and .inl inclusion.
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_cuda_kernels.inl — generated lane kernels/dispatch tables.
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/native64_host.cu — host launch wrapper implementations.
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_common.cu — shared encoding helpers.
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_raw32.cu — RAW32 encoder implementation.
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_split64.cu — SPLIT64 encoder implementation.
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_native64.cu — NATIVE64 encoder implementation.
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/fastlanes_encode.cuh — public encoder class declarations.
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/page_enc.cu — call site and orchestration integration point.
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/fastlanes_page_encoder.hpp — new declarations-only stage header.
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/fastlanes_page_encoder.cu — new implementation with categorize/batch/finalize.
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/page_fastlanes_decode.cu — native64 device runtime dispatch usage.
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/CMakeLists.txt — libcudf source list updates.
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/tests/CMakeLists.txt — test source wiring updates.
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/tests/io/parquet_fastlanes_test.cpp — parity A/B and final refactor coverage.
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/tests/io/parquet_fastlanes_native64_generated_test.cu — native64 API usage updates.
+
+### Risk Matrix
+- High: namespace cutover breaks decode/runtime symbol lookups.
+  - Detection: compile errors in page_fastlanes_decode.cu and native64 tests.
+  - Mitigation: dedicated run FL-P2-R2 with strict grep validation for old namespaces.
+- High: split file migration causes duplicate or missing template/function definitions.
+  - Detection: linker errors or ODR warnings during libcudf build.
+  - Mitigation: isolated FL-P2-R1 run with immediate full PARQUET/PARQUET_FASTLANES execution.
+- High: phase-3 batching changes break output bytes.
+  - Detection: A/B tests fail on payload/header mismatch.
+  - Mitigation: introduce A/B harness before behavior change (FL-P3-R2).
+- Medium: stream synchronization remains hidden in loop.
+  - Detection: source audit and targeted tests around run_fastlanes_cpu_encode path.
+  - Mitigation: explicit sync audit in FL-P3-R3 acceptance checks.
+
+### Included vs Excluded Scope
+- Included:
+  - FastLanes native64 host/device boundary files.
+  - FastLanes encoder implementation split and namespace migration.
+  - Parquet page encode stage refactor for categorize/batch/finalize.
+  - CMake/test wiring and parity tests required to validate refactor.
+- Excluded:
+  - New feature work beyond requested architectural refactor.
+  - Python bindings and non-Parquet IO stacks.
+  - Explicit performance optimization campaign (beyond no new synchronization regressions).
+
+### Reporting Packet Per Run
+- Commands executed (exact sequence).
+- Validation mode used (rg -n vs grep -nE fallback).
+- Test binaries and filters run.
+- Pass/fail summary and key diff summary.
+- Archive executed or not.
+- Paths to reports/artifacts when produced.

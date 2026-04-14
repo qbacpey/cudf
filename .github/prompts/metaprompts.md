@@ -218,5 +218,55 @@ START NOW
 
 MY OBJECTIVE BEGIN
 
+# Comprehensive Refactoring Plan for FastLanes Parquet Integration
+
+Please review the following architectural and performance issues identified in the FastLanes Parquet encode/decode implementation. Your task is to process these requirements and generate a staged, multi-phase execution plan. 
+
+Each phase should be treated as an independent micro-run with its own edits, compilation checks, and `libcudf` cpp test-suite validations. 
+
+
+## Phase 1: Host vs. Device API Separation 
+**Targets:** 
+- `cpp/include/cudf/fastlanes/native64_cuda.cuh`
+- `cpp/include/cudf/fastlanes/native64_cuda_kernels.inl`
+- `cpp/src/fastlanes/native64_cuda.cu`
+**Problem:** The current architecture blurs Host and Device APIs. The API header exposes functions taking `cudaStream_t` (Host API), but downstream files directly include `.inl` files containing `__device__` functions. This creates a messy architecture and risks ODR violations.
+**Action Items:**
+1. Rename `native64_cuda.cuh` to **`native64_host.hpp`**: Only for CPU-callable wrappers that launch kernels.
+2. Create **`cpp/include/cudf/fastlanes/native64_device.cuh`**: Only for `__device__` functions (e.g., `decode_lane_by_bw_device_runtime`). This file should `#include "native64_cuda_kernels.inl"` at the bottom.
+3. Rename `native64_cuda.cu` to **`native64_host.cu`**: Implements the host functions declared in `native64_host.hpp`.
+5. Since the current API exposed in `native64_cuda.cuh` is only used by host code, we need to rename these API so that their name become more reasonable (e.g., `launch_native64_encode` instead of `native64_encode` to clarify that it's a host function that launches device work).
+
+---
+
+## Phase 2: Encoder File Splitting & Namespace Cleanup
+**Targets:** 
+- `cpp/src/fastlanes/fastlanes.cu`
+- `cpp/include/cudf/fastlanes/fastlanes_encode.cuh`
+**Problem:** `fastlanes.cu` is a monolithic file handling three distinct algorithms (RAW32, SPLIT64, NATIVE64), two data types, and CPU/GPU execution. Furthermore, namespaces are convoluted (`cudf::io::parquet::detail::fastlanes_cudf` vs `native64_generated`).
+**Action Items:**
+1. **Rename and Split:** Delete `fastlanes.cu` and split its implementation into smaller, algorithm-specific files in `cpp/src/fastlanes/`:
+   - `encode_common.cu` (Shared helpers)
+   - `encode_raw32.cu`
+   - `encode_split64.cu`
+   - `encode_native64.cu`
+2. **Namespace Cleanup:** Remove the `_cudf` suffix and the floating `native64_generated` namespace. Nest everything cleanly under `namespace cudf::io::parquet::detail::fastlanes`.
+
+---
+
+## Phase 3: Resolve the "God Function" & Sync Bottleneck
+**Target:** `cpp/src/io/parquet/page_enc_fastlanes_stage.cuh`
+**Problem:** `run_fastlanes_cpu_encode` is a "God Function" implemented inside a header file. It loops over pages one-by-one, doing host/device memory copies, encoding, and crucially, calling `cudaStreamSynchronize` *inside* the loop. This completely breaks GPU concurrency.
+**Action Items:**
+1. **Move to Source File:** Rename the header to `fastlanes_page_encoder.hpp` (declarations only) and move the implementation to a new `cpp/src/io/parquet/fastlanes_page_encoder.cu` file. Drop the `fastlanes_encode_stage` namespace and use `cudf::io::parquet::detail`.
+2. **Remove Loop Syncs & Refactor to Batches:** Break `run_fastlanes_cpu_encode` into three distinct semantic phases:
+   - **Phase 4a (Categorize):** Iterate over the pages *once* to group them by encoding type (RAW32, SPLIT64, NATIVE64) and collect their pointers and counts into arrays. *Do not synchronize the stream here.*
+   - **Phase 4b (Batch Encode):** Pass the collected arrays to the already-existing *batched* APIs (`encode_pages`) of the encoder classes.
+   - **Phase 4c (Finalize):** Validate headers and launch the final payload/upload kernels (`gpuEncodePageLevels`, `gpuEncodeCpuPages`).
+
+---
+
+**Instructions for the LLM:**
+Please acknowledge this prompt by outlining your step-by-step execution plan. Ensure that each phase is isolated, limits the blast radius of changes, and guarantees bit-for-bit parity with the existing FastLanes Parquet output.
 
 MY OBJECTIVE END
