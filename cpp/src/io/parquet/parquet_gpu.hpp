@@ -967,31 +967,6 @@ void decode_fastlanes_native64(cudf::detail::hostdevice_span<PageInfo> pages,
                                rmm::cuda_stream_view stream);
 
 /**
- * @brief Launches dedicated debug kernel for FastLanes pages.
- *
- * This path is intentionally separate from the FastLanes decode kernels so
- * debug dumping cannot change decode behavior. Runtime control is via
- * FLS_DEBUG_KERNEL and the FLS_DEBUG_* print flags.
- *
- * @param[in,out] pages All pages to be decoded
- * @param[in] chunks All chunks to be decoded
- * @param[in] num_rows Total number of rows to read
- * @param[in] min_row Minimum number of rows to read
- * @param[in] level_type_size Size in bytes of the type for level decoding
- * @param[in] page_mask Boolean vector indicating which pages need to be decoded
- * @param[out] error_code Error code for kernel failures
- * @param[in] stream CUDA stream to use
- */
-void debug_decode_fastlanes_binary(cudf::detail::hostdevice_span<PageInfo> pages,
-                            cudf::detail::hostdevice_span<ColumnChunkDesc const> chunks,
-                            size_t num_rows,
-                            size_t min_row,
-                            int level_type_size,
-                            cudf::device_span<bool const> page_mask,
-                            kernel_error::pointer error_code,
-                            rmm::cuda_stream_view stream);
-
-/**
  * @brief Launches kernel for reading the DELTA_BYTE_ARRAY column data stored in the pages
  *
  * The page data will be written to the output pointed to in the page's

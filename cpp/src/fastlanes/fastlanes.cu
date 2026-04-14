@@ -1,4 +1,3 @@
-#include <cudf/fastlanes/debug.hpp>
 #include <cudf/fastlanes/fastlanes_encode.cuh>
 #include <cudf/fastlanes/fls_gen/pack/pack.hpp>
 #include <cudf/fastlanes/native64_cuda.cuh>
@@ -16,7 +15,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -206,43 +204,12 @@ void encode_vectors(unsigned_t<T> const* input,
   }
 }
 
-void maybe_print_encoded_page_debug(std::vector<uint8_t> const& host_blob,
-                                    fastlanes::TypeCastMode cast_mode,
-                                    bool debug_print,
-                                    bool include_payload_preview = true)
-{
-  if (!debug_print || host_blob.empty()) { return; }
-
-  auto const header = fastlanes::PageHeader::deserialize(host_blob.data());
-  auto info         = fastlanes::debug::make_debug_info(header);
-  info.cast_mode    = static_cast<uint8_t>(cast_mode);
-
-  if (include_payload_preview && header.body_size >= sizeof(uint32_t)) {
-    auto const* payload_u32 = reinterpret_cast<uint32_t const*>(
-      fastlanes::PageHeader::payload_ptr(host_blob.data()));
-    auto const body_words = header.body_size / sizeof(uint32_t);
-    auto const preview_count =
-      body_words < fastlanes::debug::PageDebugInfo::MAX_PAYLOAD_PREVIEW_WORDS
-        ? body_words
-        : fastlanes::debug::PageDebugInfo::MAX_PAYLOAD_PREVIEW_WORDS;
-    for (uint32_t i = 0; i < preview_count; ++i) {
-      info.payload_preview[i] = payload_u32[i];
-    }
-    info.payload_preview_count = preview_count;
-  } else {
-    info.payload_preview_count = 0;
-  }
-
-  fastlanes::debug::print_page_debug(std::cout, info);
-}
-
 template <typename T>
 EncodedPageResult encode_scalar32_page(std::vector<T> const& host_input,
                                        uint32_t count,
                                        uint64_t padded,
                                        fastlanes::TypeCastMode cast_mode,
-                                       rmm::cuda_stream_view stream,
-                                       bool debug_print)
+                                       rmm::cuda_stream_view stream)
 {
   EncodedPageResult result;
 
@@ -275,8 +242,6 @@ EncodedPageResult encode_scalar32_page(std::vector<T> const& host_input,
   result.body_size      = encoded_bytes_u32;
   result.min_value      = normalized.min_value;
 
-  maybe_print_encoded_page_debug(result.host_blob, cast_mode, debug_print);
-
   return result;
 }
 
@@ -284,8 +249,7 @@ EncodedPageResult encode_split32_page(std::vector<int64_t> const& host_input,
                                       uint32_t count,
                                       uint64_t padded,
                                       fastlanes::TypeCastMode cast_mode,
-                                      rmm::cuda_stream_view stream,
-                                      bool debug_print)
+                                      rmm::cuda_stream_view stream)
 {
   EncodedPageResult result;
   auto split = normalize_split32_page_data(host_input.data(), count, static_cast<uint32_t>(padded));
@@ -334,8 +298,6 @@ EncodedPageResult encode_split32_page(std::vector<int64_t> const& host_input,
   result.body_size      = encoded_body_size_u32;
   result.min_value =
     (static_cast<uint64_t>(split.min_high_bits) << 32) | static_cast<uint64_t>(split.min_low_bits);
-
-  maybe_print_encoded_page_debug(result.host_blob, cast_mode, debug_print);
 
   return result;
 }
@@ -407,8 +369,7 @@ EncodedPageResult create_empty_native64_result(rmm::cuda_stream_view stream)
  */
 EncodedPageResult encode_scalar32_page_helper(int32_t const* d_input,
                                               uint32_t count,
-                                              rmm::cuda_stream_view stream,
-                                              bool debug_print)
+                                              rmm::cuda_stream_view stream)
 {
   if (count == 0) { return create_empty_scalar32_result(stream); }
 
@@ -426,7 +387,7 @@ EncodedPageResult encode_scalar32_page_helper(int32_t const* d_input,
   cuda_check(cudaStreamSynchronize(stream.value()), "stream synchronize after download");
 
   auto const cast_mode = analyze_data(host_input.data(), count).first;
-  return encode_scalar32_page(host_input, count, padded, cast_mode, stream, debug_print);
+  return encode_scalar32_page(host_input, count, padded, cast_mode, stream);
 }
 
 /**
@@ -434,8 +395,7 @@ EncodedPageResult encode_scalar32_page_helper(int32_t const* d_input,
  */
 EncodedPageResult encode_split32_page_helper(int64_t const* d_input,
                                              uint32_t count,
-                                             rmm::cuda_stream_view stream,
-                                             bool debug_print)
+                                             rmm::cuda_stream_view stream)
 {
   if (count == 0) { return create_empty_split32_result(stream); }
 
@@ -453,7 +413,7 @@ EncodedPageResult encode_split32_page_helper(int64_t const* d_input,
   cuda_check(cudaStreamSynchronize(stream.value()), "stream synchronize after download");
 
   auto const cast_mode = analyze_data(host_input.data(), count).first;
-  return encode_split32_page(host_input, count, padded, cast_mode, stream, debug_print);
+  return encode_split32_page(host_input, count, padded, cast_mode, stream);
 }
 
 /**
@@ -461,8 +421,7 @@ EncodedPageResult encode_split32_page_helper(int64_t const* d_input,
  */
 EncodedPageResult encode_native64_page_helper(int64_t const* d_input,
                                               uint32_t count,
-                                              rmm::cuda_stream_view stream,
-                                              bool debug_print)
+                                              rmm::cuda_stream_view stream)
 {
   if (count == 0) { return create_empty_native64_result(stream); }
 
@@ -551,9 +510,6 @@ EncodedPageResult encode_native64_page_helper(int64_t const* d_input,
   result.body_size      = encoded_body_size;
   result.min_value      = min_value_bits;
 
-  // Native64 payload is produced directly on device, so host_blob carries header-only preview data.
-  maybe_print_encoded_page_debug(result.host_blob, cast_mode, debug_print, false);
-
   return result;
 }
 
@@ -563,8 +519,7 @@ EncodedPageResult encode_native64_page_helper(int64_t const* d_input,
 std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
 encode_scalar32_pages_helper(std::vector<int32_t*> const& h_gather_ptrs,
                              std::vector<uint32_t> const& h_gather_counts,
-                             rmm::cuda_stream_view stream,
-                             bool debug_print)
+                             rmm::cuda_stream_view stream)
 {
   size_t const num_pages = h_gather_ptrs.size();
 
@@ -579,7 +534,7 @@ encode_scalar32_pages_helper(std::vector<int32_t*> const& h_gather_ptrs,
     uint32_t const count = h_gather_counts[i];
     if (count == 0) { continue; }
 
-    auto page = encode_scalar32_page_helper(h_gather_ptrs[i], count, stream, debug_print);
+    auto page = encode_scalar32_page_helper(h_gather_ptrs[i], count, stream);
 
     encoded_buffers.push_back(std::move(page.device_blob));
     h_upload_ptrs[i]  = static_cast<uint8_t*>(encoded_buffers.back().data());
@@ -595,8 +550,7 @@ encode_scalar32_pages_helper(std::vector<int32_t*> const& h_gather_ptrs,
 std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
 encode_split32_pages_helper(std::vector<int64_t*> const& h_gather_ptrs,
                             std::vector<uint32_t> const& h_gather_counts,
-                            rmm::cuda_stream_view stream,
-                            bool debug_print)
+                            rmm::cuda_stream_view stream)
 {
   size_t const num_pages = h_gather_ptrs.size();
 
@@ -611,7 +565,7 @@ encode_split32_pages_helper(std::vector<int64_t*> const& h_gather_ptrs,
     uint32_t const count = h_gather_counts[i];
     if (count == 0) { continue; }
 
-    auto page = encode_split32_page_helper(h_gather_ptrs[i], count, stream, debug_print);
+    auto page = encode_split32_page_helper(h_gather_ptrs[i], count, stream);
 
     encoded_buffers.push_back(std::move(page.device_blob));
     h_upload_ptrs[i]  = static_cast<uint8_t*>(encoded_buffers.back().data());
@@ -627,8 +581,7 @@ encode_split32_pages_helper(std::vector<int64_t*> const& h_gather_ptrs,
 std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
 encode_native64_pages_helper(std::vector<int64_t*> const& h_gather_ptrs,
                              std::vector<uint32_t> const& h_gather_counts,
-                             rmm::cuda_stream_view stream,
-                             bool debug_print)
+                             rmm::cuda_stream_view stream)
 {
   size_t const num_pages = h_gather_ptrs.size();
 
@@ -643,7 +596,7 @@ encode_native64_pages_helper(std::vector<int64_t*> const& h_gather_ptrs,
     uint32_t const count = h_gather_counts[i];
     if (count == 0) { continue; }
 
-    auto page = encode_native64_page_helper(h_gather_ptrs[i], count, stream, debug_print);
+    auto page = encode_native64_page_helper(h_gather_ptrs[i], count, stream);
 
     encoded_buffers.push_back(std::move(page.device_blob));
     h_upload_ptrs[i]  = static_cast<uint8_t*>(encoded_buffers.back().data());
@@ -658,7 +611,7 @@ encode_native64_pages_helper(std::vector<int64_t*> const& h_gather_ptrs,
 /**
  * @brief Construct the explicit INT32 RAW32 FastLanes encoder.
  */
-FastLanesInt32Encoder::FastLanesInt32Encoder(bool debug_print) : debug_print_(debug_print) {}
+FastLanesInt32Encoder::FastLanesInt32Encoder() {}
 
 /**
  * @brief Encode a single INT32 page via the explicit RAW32 helper path.
@@ -666,7 +619,7 @@ FastLanesInt32Encoder::FastLanesInt32Encoder(bool debug_print) : debug_print_(de
 EncodedPageResult FastLanesInt32Encoder::encode_page(int32_t const* d_input,
                                                      uint32_t count,
                                                      rmm::cuda_stream_view stream)
-{ return encode_scalar32_page_helper(d_input, count, stream, debug_print_); }
+{ return encode_scalar32_page_helper(d_input, count, stream); }
 
 /**
  * @brief Encode batched INT32 pages via the explicit RAW32 helper path.
@@ -675,15 +628,12 @@ std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<u
 FastLanesInt32Encoder::encode_pages(std::vector<int32_t*> const& h_gather_ptrs,
                                     std::vector<uint32_t> const& h_gather_counts,
                                     rmm::cuda_stream_view stream)
-{ return encode_scalar32_pages_helper(h_gather_ptrs, h_gather_counts, stream, debug_print_); }
+{ return encode_scalar32_pages_helper(h_gather_ptrs, h_gather_counts, stream); }
 
 /**
  * @brief Construct the explicit INT64 SPLIT64 FastLanes encoder.
  */
-FastLanesInt64Split32Encoder::FastLanesInt64Split32Encoder(bool debug_print)
-  : debug_print_(debug_print)
-{
-}
+FastLanesInt64Split32Encoder::FastLanesInt64Split32Encoder() {}
 
 /**
  * @brief Encode a single INT64 page via the explicit SPLIT64 helper path.
@@ -691,7 +641,7 @@ FastLanesInt64Split32Encoder::FastLanesInt64Split32Encoder(bool debug_print)
 EncodedPageResult FastLanesInt64Split32Encoder::encode_page(int64_t const* d_input,
                                                             uint32_t count,
                                                             rmm::cuda_stream_view stream)
-{ return encode_split32_page_helper(d_input, count, stream, debug_print_); }
+{ return encode_split32_page_helper(d_input, count, stream); }
 
 /**
  * @brief Encode batched INT64 pages via the explicit SPLIT64 helper path.
@@ -700,15 +650,12 @@ std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<u
 FastLanesInt64Split32Encoder::encode_pages(std::vector<int64_t*> const& h_gather_ptrs,
                                            std::vector<uint32_t> const& h_gather_counts,
                                            rmm::cuda_stream_view stream)
-{ return encode_split32_pages_helper(h_gather_ptrs, h_gather_counts, stream, debug_print_); }
+{ return encode_split32_pages_helper(h_gather_ptrs, h_gather_counts, stream); }
 
 /**
  * @brief Construct the explicit INT64 Native64 FastLanes encoder.
  */
-FastLanesInt64NativeEncoder::FastLanesInt64NativeEncoder(bool debug_print)
-  : debug_print_(debug_print)
-{
-}
+FastLanesInt64NativeEncoder::FastLanesInt64NativeEncoder() {}
 
 /**
  * @brief Encode a single INT64 page via the explicit Native64 helper path.
@@ -716,7 +663,7 @@ FastLanesInt64NativeEncoder::FastLanesInt64NativeEncoder(bool debug_print)
 EncodedPageResult FastLanesInt64NativeEncoder::encode_page(int64_t const* d_input,
                                                            uint32_t count,
                                                            rmm::cuda_stream_view stream)
-{ return encode_native64_page_helper(d_input, count, stream, debug_print_); }
+{ return encode_native64_page_helper(d_input, count, stream); }
 
 /**
  * @brief Encode batched INT64 pages via the explicit Native64 helper path.
@@ -725,6 +672,6 @@ std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<u
 FastLanesInt64NativeEncoder::encode_pages(std::vector<int64_t*> const& h_gather_ptrs,
                                           std::vector<uint32_t> const& h_gather_counts,
                                           rmm::cuda_stream_view stream)
-{ return encode_native64_pages_helper(h_gather_ptrs, h_gather_counts, stream, debug_print_); }
+{ return encode_native64_pages_helper(h_gather_ptrs, h_gather_counts, stream); }
 
 }  // namespace cudf::io::parquet::detail::fastlanes_cudf

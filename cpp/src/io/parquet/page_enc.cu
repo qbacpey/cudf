@@ -4,6 +4,7 @@
  */
 
 #include "delta_enc.cuh"
+#include "fastlanes_parquet_common.cuh"
 #include "io/parquet/parquet_gpu.hpp"
 #include "io/utilities/block_utils.cuh"
 #include "page_string_utils.cuh"
@@ -18,7 +19,6 @@
 #include <cudf/detail/utilities/stream_pool.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/fastlanes/common.cuh>
-#include <cudf/fastlanes/debug.hpp>
 #include <cudf/fastlanes/fastlanes_encode.cuh>
 
 #include <rmm/cuda_stream_view.hpp>
@@ -500,121 +500,6 @@ CUDF_KERNEL void __launch_bounds__(128)
       groups[frag_id]  = g;
     }
   }
-}
-
-CUDF_HOST_DEVICE constexpr bool is_fastlanes_bitpack_raw_supported_logical(cudf::type_id logical_type)
-{
-  switch (logical_type) {
-    case cudf::type_id::INT8:
-    case cudf::type_id::UINT8:
-    case cudf::type_id::INT16:
-    case cudf::type_id::UINT16:
-    case cudf::type_id::INT32:
-    case cudf::type_id::UINT32:
-    case cudf::type_id::TIMESTAMP_DAYS:
-    case cudf::type_id::DECIMAL32:
-    case cudf::type_id::DURATION_SECONDS:
-    case cudf::type_id::DURATION_DAYS:
-    case cudf::type_id::DURATION_MILLISECONDS: return true;
-    default: return false;
-  }
-}
-
-CUDF_HOST_DEVICE constexpr bool is_fastlanes_bitpack_split64_supported_logical(
-  cudf::type_id logical_type)
-{
-  return logical_type == cudf::type_id::INT64 || logical_type == cudf::type_id::UINT64;
-}
-
-CUDF_HOST_DEVICE constexpr bool is_fastlanes_flat_column(int32_t max_rep_level)
-{
-  return max_rep_level == 0;
-}
-
-CUDF_HOST_DEVICE constexpr bool is_fastlanes_bitpack_raw_runtime_supported(
-  Type physical_type,
-  cudf::type_id logical_type,
-  int32_t max_rep_level)
-{
-  return is_fastlanes_flat_column(max_rep_level) &&
-         physical_type == Type::INT32 &&
-         is_fastlanes_bitpack_raw_supported_logical(logical_type);
-}
-
-CUDF_HOST_DEVICE constexpr bool is_fastlanes_bitpack_split64_runtime_supported(
-  Type physical_type,
-  cudf::type_id logical_type,
-  int32_t max_rep_level)
-{
-  return is_fastlanes_flat_column(max_rep_level) &&
-         physical_type == Type::INT64 &&
-         is_fastlanes_bitpack_split64_supported_logical(logical_type);
-}
-
-CUDF_HOST_DEVICE constexpr bool is_fastlanes_delta_binary_runtime_supported(
-  Type physical_type,
-  cudf::type_id logical_type,
-  int32_t max_rep_level)
-{
-  return is_fastlanes_flat_column(max_rep_level) &&
-         physical_type == Type::INT64 &&
-         is_fastlanes_bitpack_split64_supported_logical(logical_type);
-}
-
-/**
- * @brief Returns true when FASTLANES_DELTA_BINARY encode routing is activated.
- */
-CUDF_HOST_DEVICE constexpr bool is_fastlanes_delta_binary_encode_enabled() { return true; }
-
-CUDF_HOST_DEVICE constexpr uint32_t fastlanes_bitpack_kernel_masks()
-{
-  return BitOr(
-    encode_kernel_mask::FASTLANE_BITPACK_RAW, encode_kernel_mask::FASTLANE_BITPACK_SPLIT64);
-}
-
-CUDF_HOST_DEVICE constexpr uint32_t fastlanes_kernel_masks()
-{
-  return BitOr(fastlanes_bitpack_kernel_masks(), encode_kernel_mask::FASTLANES_DELTA_BINARY);
-}
-
-CUDF_HOST_DEVICE constexpr bool is_fastlanes_bitpack_mask(encode_kernel_mask kernel_mask)
-{
-  return BitAnd(kernel_mask, fastlanes_bitpack_kernel_masks()) != 0;
-}
-
-CUDF_HOST_DEVICE constexpr bool is_fastlanes_mask(encode_kernel_mask kernel_mask)
-{
-  return BitAnd(kernel_mask, fastlanes_kernel_masks()) != 0;
-}
-
-CUDF_HOST_DEVICE constexpr Encoding fastlanes_encoding_for_mask(encode_kernel_mask kernel_mask)
-{
-  if (BitAnd(kernel_mask, encode_kernel_mask::FASTLANES_DELTA_BINARY) != 0) {
-    return Encoding::FASTLANES_DELTA_BINARY;
-  }
-  if (BitAnd(kernel_mask, encode_kernel_mask::FASTLANE_BITPACK_SPLIT64) != 0) {
-    return Encoding::FASTLANE_BITPACK_SPLIT64;
-  }
-  return Encoding::FASTLANE_BITPACK_RAW;
-}
-
-CUDF_HOST_DEVICE constexpr size_t fastlanes_component_streams_for_mask(
-  encode_kernel_mask kernel_mask,
-  Type physical_type)
-{
-  if (kernel_mask == encode_kernel_mask::FASTLANE_BITPACK_SPLIT64) { return size_t{2}; }
-
-  if (kernel_mask == encode_kernel_mask::FASTLANE_BITPACK_RAW) {
-    // Defensive fallback: avoid under-allocation if an unexpected INT64 raw request slips through.
-    return physical_type == Type::INT64 ? size_t{2} : size_t{1};
-  }
-
-  if (kernel_mask == encode_kernel_mask::FASTLANES_DELTA_BINARY) {
-    // Native64 payloads are single-stream 64-bit component data.
-    return size_t{1};
-  }
-
-  return size_t{0};
 }
 
 // given a column chunk, determine which data encoding to use
@@ -2947,17 +2832,6 @@ CUDF_KERNEL void __launch_bounds__(block_size, 8)
   uint8_t* input_ptr = pre_encoded_ptrs[blockIdx.x];
   uint32_t data_len  = pre_encoded_sizes[blockIdx.x];
 
-  if (fastlanes::debug::is_workload_enabled() && t == 0 && blockIdx.x < 2) {
-    printf("[FL COPY PRE ] page=%d start_row=%u num_rows=%u num_leaf=%u first_byte=%u data_len=%u max_data=%u\n",
-           static_cast<int>(blockIdx.x),
-           s->page.start_row,
-           s->page.num_rows,
-           s->page.num_leaf_values,
-           input_ptr != nullptr ? static_cast<unsigned>(input_ptr[0]) : 0,
-           data_len,
-           s->page.max_data_size);
-  }
-
   // Safe checker for the related device pointers
   // Device code cannot use CUDF_EXPECTS (which throws exceptions).
   // Use CUDF_UNREACHABLE to trap/panic on GPU.
@@ -2972,18 +2846,6 @@ CUDF_KERNEL void __launch_bounds__(block_size, 8)
     s->cur[i] = input_ptr[i];
   }
   __syncthreads();
-
-  if (fastlanes::debug::is_workload_enabled() && t == 0 && blockIdx.x < 2) {
-    auto const copied_word0 = data_len >= sizeof(uint32_t)
-                                ? *reinterpret_cast<uint32_t const*>(s->cur)
-                                : 0u;
-    printf("[FL COPY POST] page=%d copied_word0=0x%08x end_word0=0x%08x\n",
-           static_cast<int>(blockIdx.x),
-           copied_word0,
-           input_ptr != nullptr && data_len >= sizeof(uint32_t)
-             ? *reinterpret_cast<uint32_t const*>(input_ptr)
-             : 0u);
-  }
 
   finish_page_encode<block_size>(
     s, s->cur + data_len, pages, comp_in, comp_out, comp_results, write_v2_headers);

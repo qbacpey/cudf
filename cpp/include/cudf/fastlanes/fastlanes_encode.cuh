@@ -39,10 +39,8 @@ class FastLanesInt32Encoder {
  public:
   /**
    * @brief Construct an INT32 FastLanes encoder.
-   *
-   * @param debug_print Enable verbose debug output for encoded page metadata.
    */
-  explicit FastLanesInt32Encoder(bool debug_print = false);
+  FastLanesInt32Encoder();
 
   /**
    * @brief Encode one INT32 page into a FastLanes RAW32 payload.
@@ -69,8 +67,6 @@ class FastLanesInt32Encoder {
                std::vector<uint32_t> const& h_gather_counts,
                rmm::cuda_stream_view stream);
 
- private:
-  bool debug_print_;
 };
 
 /**
@@ -80,10 +76,8 @@ class FastLanesInt64Split32Encoder {
  public:
   /**
    * @brief Construct an INT64 SPLIT64 FastLanes encoder.
-   *
-   * @param debug_print Enable verbose debug output for encoded page metadata.
    */
-  explicit FastLanesInt64Split32Encoder(bool debug_print = false);
+  FastLanesInt64Split32Encoder();
 
   /**
    * @brief Encode one INT64 page into a FastLanes SPLIT64 payload.
@@ -110,8 +104,6 @@ class FastLanesInt64Split32Encoder {
                std::vector<uint32_t> const& h_gather_counts,
                rmm::cuda_stream_view stream);
 
- private:
-  bool debug_print_;
 };
 
 /**
@@ -121,10 +113,8 @@ class FastLanesInt64NativeEncoder {
  public:
   /**
    * @brief Construct an INT64 Native64 FastLanes encoder.
-   *
-   * @param debug_print Enable verbose debug output for encoded page metadata.
    */
-  explicit FastLanesInt64NativeEncoder(bool debug_print = false);
+  FastLanesInt64NativeEncoder();
 
   /**
    * @brief Encode one INT64 page into a FastLanes Native64 payload.
@@ -151,8 +141,6 @@ class FastLanesInt64NativeEncoder {
                std::vector<uint32_t> const& h_gather_counts,
                rmm::cuda_stream_view stream);
 
- private:
-  bool debug_print_;
 };
 
 }  // namespace cudf::io::parquet::detail::fastlanes_cudf
