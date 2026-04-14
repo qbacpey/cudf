@@ -687,14 +687,14 @@ TEST_F(ParquetCpuEncoderTest, FastLanesHeaderScalar32MetadataRoundTrip)
   EXPECT_EQ(header.body_size, body.size());
   EXPECT_EQ(header.min_value_low_bits, min_value_low);
   EXPECT_EQ(header.min_value_high_bits, 0);
-  EXPECT_TRUE(fastlanes::is_valid_for_external_mode(header, false));
-  EXPECT_FALSE(fastlanes::is_valid_for_external_mode(header, true));
+  EXPECT_TRUE(fastlanes::is_valid_raw32_header(header));
+  EXPECT_FALSE(fastlanes::is_valid_split64_header(header));
   EXPECT_EQ(fastlanes::u32_bits_to_int32(header.min_value_low_bits), -1234567);
 
   // Reserved flags are ignored for mode identity.
   blob[fastlanes::PageHeader::OFFSET_RESERVED_FLAGS] = 0xff;
   auto const header_with_reserved_flags = fastlanes::PageHeader::deserialize(blob.data());
-  EXPECT_TRUE(fastlanes::is_valid_for_external_mode(header_with_reserved_flags, false));
+  EXPECT_TRUE(fastlanes::is_valid_raw32_header(header_with_reserved_flags));
   EXPECT_TRUE(header_with_reserved_flags.pre_delta);
 }
 
@@ -717,8 +717,8 @@ TEST_F(ParquetCpuEncoderTest, FastLanesHeaderSplit32MetadataRoundTrip)
   EXPECT_TRUE(header.pre_delta);
   EXPECT_EQ(header.min_value_low_bits, 0x89abcdefu);
   EXPECT_EQ(header.min_value_high_bits, 0x10203040u);
-  EXPECT_TRUE(fastlanes::is_valid_for_external_mode(header, true));
-  EXPECT_FALSE(fastlanes::is_valid_for_external_mode(header, false));
+  EXPECT_TRUE(fastlanes::is_valid_split64_header(header));
+  EXPECT_FALSE(fastlanes::is_valid_raw32_header(header));
 }
 
 TEST_F(ParquetCpuEncoderTest, FastLanesHeaderRejectsMalformedSplit32Metadata)
@@ -726,12 +726,12 @@ TEST_F(ParquetCpuEncoderTest, FastLanesHeaderRejectsMalformedSplit32Metadata)
   auto malformed = fastlanes::PageHeader::serialize_split32(7, 7, 64, 1024, 0u, 0u, nullptr, 0);
 
   auto header = fastlanes::PageHeader::deserialize(malformed.data());
-  EXPECT_FALSE(fastlanes::is_valid_for_external_mode(header, true));
+  EXPECT_FALSE(fastlanes::is_valid_split64_header(header));
 
   // Reserved flags do not define mode identity.
   malformed[fastlanes::PageHeader::OFFSET_RESERVED_FLAGS] = 0x7f;
   header = fastlanes::PageHeader::deserialize(malformed.data());
-  EXPECT_FALSE(fastlanes::is_valid_for_external_mode(header, true));
+  EXPECT_FALSE(fastlanes::is_valid_split64_header(header));
 
   std::vector<uint8_t> body(fastlanes::encoded_size_bytes(1024, 7) +
                             fastlanes::encoded_size_bytes(1024, 7),
@@ -739,29 +739,29 @@ TEST_F(ParquetCpuEncoderTest, FastLanesHeaderRejectsMalformedSplit32Metadata)
   auto valid = fastlanes::PageHeader::serialize_split32(
     7, 7, 64, 1024, 0u, 0u, body.data(), body.size());
   header = fastlanes::PageHeader::deserialize(valid.data());
-  EXPECT_TRUE(fastlanes::is_valid_for_external_mode(header, true));
+  EXPECT_TRUE(fastlanes::is_valid_split64_header(header));
 
   valid[fastlanes::PageHeader::OFFSET_RESERVED_FLAGS] = 0x2a;
   header = fastlanes::PageHeader::deserialize(valid.data());
-  EXPECT_TRUE(fastlanes::is_valid_for_external_mode(header, true));
+  EXPECT_TRUE(fastlanes::is_valid_split64_header(header));
 
   // Split64 metadata still rejects malformed component widths.
   malformed[fastlanes::PageHeader::OFFSET_COMPONENT_BW_LOW] = 0;
   header = fastlanes::PageHeader::deserialize(malformed.data());
-  EXPECT_FALSE(fastlanes::is_valid_for_external_mode(header, true));
+  EXPECT_FALSE(fastlanes::is_valid_split64_header(header));
 }
 
 TEST_F(ParquetCpuEncoderTest, FastLanesRawSplit64DefaultPreDelta)
 {
-  EXPECT_TRUE(fastlanes::default_pre_delta_for_mode(false));
-  EXPECT_TRUE(fastlanes::default_pre_delta_for_mode(true));
+  EXPECT_TRUE(fastlanes::default_pre_delta_for_raw32());
+  EXPECT_TRUE(fastlanes::default_pre_delta_for_split64());
 
   std::vector<uint8_t> scalar_body(fastlanes::encoded_size_bytes(1024, 9), uint8_t{0});
   auto scalar_blob = fastlanes::PageHeader::serialize_scalar32(
     9, 128, 1024, 0x1234u, scalar_body.data(), scalar_body.size());
   auto const scalar_header = fastlanes::PageHeader::deserialize(scalar_blob.data());
   EXPECT_TRUE(scalar_header.pre_delta);
-  EXPECT_TRUE(fastlanes::is_valid_for_external_mode(scalar_header, false));
+  EXPECT_TRUE(fastlanes::is_valid_raw32_header(scalar_header));
 
   std::vector<uint8_t> split_body(fastlanes::encoded_size_bytes(1024, 7) +
                                     fastlanes::encoded_size_bytes(1024, 11),
@@ -770,12 +770,12 @@ TEST_F(ParquetCpuEncoderTest, FastLanesRawSplit64DefaultPreDelta)
     7, 11, 128, 1024, 0x11111111u, 0x22222222u, split_body.data(), split_body.size());
   auto const split_header = fastlanes::PageHeader::deserialize(split_blob.data());
   EXPECT_TRUE(split_header.pre_delta);
-  EXPECT_TRUE(fastlanes::is_valid_for_external_mode(split_header, true));
+  EXPECT_TRUE(fastlanes::is_valid_split64_header(split_header));
 }
 
 TEST_F(ParquetCpuEncoderTest, FastLanesRawRejectsPreDeltaFalse)
 {
-  EXPECT_TRUE(fastlanes::default_pre_delta_for_mode(false));
+  EXPECT_TRUE(fastlanes::default_pre_delta_for_raw32());
 
   std::vector<uint8_t> body(fastlanes::encoded_size_bytes(1024, 10), uint8_t{0});
   auto blob = fastlanes::PageHeader::serialize_scalar32(
@@ -783,12 +783,12 @@ TEST_F(ParquetCpuEncoderTest, FastLanesRawRejectsPreDeltaFalse)
 
   auto header = fastlanes::PageHeader::deserialize(blob.data());
   EXPECT_TRUE(header.pre_delta);
-  EXPECT_TRUE(fastlanes::is_valid_for_external_mode(header, false));
+  EXPECT_TRUE(fastlanes::is_valid_raw32_header(header));
 
   blob[fastlanes::PageHeader::OFFSET_PRE_DELTA] = 0;
   header                                         = fastlanes::PageHeader::deserialize(blob.data());
   EXPECT_FALSE(header.pre_delta);
-  EXPECT_FALSE(fastlanes::is_valid_for_external_mode(header, false));
+  EXPECT_FALSE(fastlanes::is_valid_raw32_header(header));
 }
 
 TEST_F(ParquetCpuEncoderTest, FastLanesDecodeRejectsRawPreDeltaDisabled)
@@ -800,7 +800,7 @@ TEST_F(ParquetCpuEncoderTest, FastLanesDecodeRejectsRawPreDeltaDisabled)
   blob[fastlanes::PageHeader::OFFSET_PRE_DELTA] = 0;
   auto header = fastlanes::PageHeader::deserialize(blob.data());
   EXPECT_FALSE(header.pre_delta);
-  EXPECT_FALSE(fastlanes::is_valid_for_external_mode(header, false));
+  EXPECT_FALSE(fastlanes::is_valid_raw32_header(header));
 }
 
 TEST_F(ParquetCpuEncoderTest, FastLanesSplit64DecodeHonorsPreDelta)
@@ -813,12 +813,12 @@ TEST_F(ParquetCpuEncoderTest, FastLanesSplit64DecodeHonorsPreDelta)
 
   auto split_header = fastlanes::PageHeader::deserialize(split_blob.data());
   EXPECT_TRUE(split_header.pre_delta);
-  EXPECT_TRUE(fastlanes::is_valid_for_external_mode(split_header, true));
+  EXPECT_TRUE(fastlanes::is_valid_split64_header(split_header));
 
   split_blob[fastlanes::PageHeader::OFFSET_PRE_DELTA] = 0;
   split_header                                         = fastlanes::PageHeader::deserialize(split_blob.data());
   EXPECT_FALSE(split_header.pre_delta);
-  EXPECT_FALSE(fastlanes::is_valid_for_external_mode(split_header, true));
+  EXPECT_FALSE(fastlanes::is_valid_split64_header(split_header));
 }
 
 TEST_F(ParquetCpuEncoderTest, FastLanesMixedEncodingsWithDate32LogicalType)

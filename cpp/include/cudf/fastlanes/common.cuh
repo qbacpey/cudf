@@ -218,31 +218,42 @@ __device__ __host__ inline constexpr bool is_valid_native64_bitwidth(uint8_t bit
 }
 
 /**
- * @brief External FastLanes decode/validation mode selected by parquet page encoding.
+ * @brief Default PRE_DELTA policy for RAW32 pages.
  */
-enum class ExternalPageMode : uint8_t {
-  RAW32,
-  SPLIT64,
-  NATIVE64,
-};
+__device__ __host__ inline constexpr bool default_pre_delta_for_raw32() { return true; }
 
 /**
- * @brief Default PRE_DELTA policy by external FastLanes mode.
+ * @brief Default PRE_DELTA policy for SPLIT64 pages.
  */
-__device__ __host__ inline constexpr bool default_pre_delta_for_mode(bool split64_mode)
+__device__ __host__ inline constexpr bool default_pre_delta_for_split64() { return true; }
+
+/**
+ * @brief Default PRE_DELTA policy for NATIVE64 pages.
+ */
+__device__ __host__ inline constexpr bool default_pre_delta_for_native64() { return false; }
+
+/**
+ * @brief Validate PRE_DELTA for RAW32 pages.
+ */
+__device__ __host__ inline constexpr bool is_pre_delta_valid_for_raw32(bool pre_delta)
 {
-  static_cast<void>(split64_mode);
-  return true;
+  return pre_delta == default_pre_delta_for_raw32();
 }
 
 /**
- * @brief Validate PRE_DELTA flag against the selected external FastLanes mode.
+ * @brief Validate PRE_DELTA for SPLIT64 pages.
  */
-__device__ __host__ inline constexpr bool is_pre_delta_valid_for_mode(bool split64_mode,
-                                                                       bool pre_delta)
+__device__ __host__ inline constexpr bool is_pre_delta_valid_for_split64(bool pre_delta)
 {
-  static_cast<void>(split64_mode);
-  return pre_delta;
+  return pre_delta == default_pre_delta_for_split64();
+}
+
+/**
+ * @brief Validate PRE_DELTA for NATIVE64 pages.
+ */
+__device__ __host__ inline constexpr bool is_pre_delta_valid_for_native64(bool pre_delta)
+{
+  return pre_delta == default_pre_delta_for_native64();
 }
 
 // =============================================================================
@@ -315,13 +326,12 @@ struct PageHeader {
                                                  uint32_t min_val_low_bits,
                                                  const uint8_t* encoded_body,
                                                  size_t body_sz,
-                                                 bool pre_delta =
-                                                   default_pre_delta_for_mode(false))
+                                                 bool pre_delta = default_pre_delta_for_raw32())
   {
     if (!is_valid_bitwidth(bw)) {
       throw std::invalid_argument("FastLanes: bitwidth must be in [1, 32]");
     }
-    if (!is_pre_delta_valid_for_mode(false, pre_delta)) {
+    if (!is_pre_delta_valid_for_raw32(pre_delta)) {
       throw std::invalid_argument("FastLanes: RAW mode requires PRE_DELTA=true");
     }
     if (pad_count < orig_count) {
@@ -371,12 +381,12 @@ struct PageHeader {
                                                 uint32_t min_val_high_bits,
                                                 const uint8_t* encoded_body,
                                                 size_t body_sz,
-                                                bool pre_delta = default_pre_delta_for_mode(true))
+                                                bool pre_delta = default_pre_delta_for_split64())
   {
     if (!is_valid_bitwidth(bw_low) || !is_valid_bitwidth(bw_high)) {
       throw std::invalid_argument("FastLanes: split32 bitwidths must be in [1, 32]");
     }
-    if (!is_pre_delta_valid_for_mode(true, pre_delta)) {
+    if (!is_pre_delta_valid_for_split64(pre_delta)) {
       throw std::invalid_argument("FastLanes: SPLIT64 mode requires PRE_DELTA=true");
     }
     if (pad_count < orig_count) {
@@ -421,13 +431,12 @@ struct PageHeader {
                                                  uint64_t min_val_bits,
                                                  const uint8_t* encoded_body,
                                                  size_t body_sz,
-                                                 bool pre_delta =
-                                                   default_pre_delta_for_mode(false))
+                                                 bool pre_delta = default_pre_delta_for_native64())
   {
     if (!is_valid_native64_bitwidth(bw)) {
       throw std::invalid_argument("FastLanes: native64 bitwidth must be in [1, 64]");
     }
-    if (!is_pre_delta_valid_for_mode(false, pre_delta)) {
+    if (!is_pre_delta_valid_for_native64(pre_delta)) {
       throw std::invalid_argument("FastLanes: NATIVE64 mode requires PRE_DELTA=true");
     }
     if (pad_count < orig_count) {
@@ -529,38 +538,25 @@ struct PageHeader {
     return true;
   }
 
-  __device__ __host__ constexpr size_t expected_body_size_bytes(bool split64_mode) const
+  __device__ __host__ constexpr size_t expected_raw32_body_size_bytes() const
   {
     if (padded_count == 0) { return 0; }
-    if (split64_mode) {
-      if (!has_valid_split64_mode_metadata()) { return 0; }
-      return encoded_size_bytes(padded_count, component_bitwidth_low) +
-             encoded_size_bytes(padded_count, component_bitwidth_high);
-    }
-
     if (!has_valid_raw_mode_metadata()) { return 0; }
     return encoded_size_bytes(padded_count, component_bitwidth_low);
   }
 
-  /**
-   * @brief Return the expected payload size in bytes for an explicit external mode.
-   */
-  __device__ __host__ constexpr size_t expected_body_size_bytes(ExternalPageMode mode) const
+  __device__ __host__ constexpr size_t expected_split64_body_size_bytes() const
   {
     if (padded_count == 0) { return 0; }
+    if (!has_valid_split64_mode_metadata()) { return 0; }
+    return encoded_size_bytes(padded_count, component_bitwidth_low) +
+           encoded_size_bytes(padded_count, component_bitwidth_high);
+  }
 
-    if (mode == ExternalPageMode::SPLIT64) {
-      if (!has_valid_split64_mode_metadata()) { return 0; }
-      return encoded_size_bytes(padded_count, component_bitwidth_low) +
-             encoded_size_bytes(padded_count, component_bitwidth_high);
-    }
-
-    if (mode == ExternalPageMode::NATIVE64) {
-      if (!has_valid_native64_mode_metadata()) { return 0; }
-      return encoded_size_bytes(padded_count, component_bitwidth_low);
-    }
-
-    if (!has_valid_raw_mode_metadata()) { return 0; }
+  __device__ __host__ constexpr size_t expected_native64_body_size_bytes() const
+  {
+    if (padded_count == 0) { return 0; }
+    if (!has_valid_native64_mode_metadata()) { return 0; }
     return encoded_size_bytes(padded_count, component_bitwidth_low);
   }
 
@@ -579,37 +575,42 @@ struct PageHeader {
 };
 
 /**
- * @brief Validate a decoded FastLanes header for an externally selected decode mode.
+ * @brief Validate RAW32 page header metadata.
  */
-__device__ __host__ inline constexpr bool is_valid_for_external_mode(PageHeader const& header,
-                                                                     ExternalPageMode mode)
+__device__ __host__ inline constexpr bool is_valid_raw32_header(PageHeader const& header)
 {
   if (!header.has_valid_common_metadata()) { return false; }
-  auto const split64_mode = mode == ExternalPageMode::SPLIT64;
-  if (!is_pre_delta_valid_for_mode(split64_mode, header.pre_delta)) { return false; }
+  if (!is_pre_delta_valid_for_raw32(header.pre_delta)) { return false; }
+  if (!header.has_valid_raw_mode_metadata()) { return false; }
 
-  if (mode == ExternalPageMode::SPLIT64) {
-    if (!header.has_valid_split64_mode_metadata()) { return false; }
-  } else if (mode == ExternalPageMode::NATIVE64) {
-    if (!header.has_valid_native64_mode_metadata()) { return false; }
-  } else {
-    if (!header.has_valid_raw_mode_metadata()) { return false; }
-  }
-
-  auto const expected_body = header.expected_body_size_bytes(mode);
-  if (header.body_size < expected_body) { return false; }
-
-  return true;
+  auto const expected_body = header.expected_raw32_body_size_bytes();
+  return header.body_size >= expected_body;
 }
 
 /**
- * @brief Backward-compatible wrapper for raw/split mode validation.
+ * @brief Validate SPLIT64 page header metadata.
  */
-__device__ __host__ inline constexpr bool is_valid_for_external_mode(PageHeader const& header,
-                                                                     bool split64_mode)
+__device__ __host__ inline constexpr bool is_valid_split64_header(PageHeader const& header)
 {
-  return is_valid_for_external_mode(
-    header, split64_mode ? ExternalPageMode::SPLIT64 : ExternalPageMode::RAW32);
+  if (!header.has_valid_common_metadata()) { return false; }
+  if (!is_pre_delta_valid_for_split64(header.pre_delta)) { return false; }
+  if (!header.has_valid_split64_mode_metadata()) { return false; }
+
+  auto const expected_body = header.expected_split64_body_size_bytes();
+  return header.body_size >= expected_body;
+}
+
+/**
+ * @brief Validate NATIVE64 page header metadata.
+ */
+__device__ __host__ inline constexpr bool is_valid_native64_header(PageHeader const& header)
+{
+  if (!header.has_valid_common_metadata()) { return false; }
+  if (!is_pre_delta_valid_for_native64(header.pre_delta)) { return false; }
+  if (!header.has_valid_native64_mode_metadata()) { return false; }
+
+  auto const expected_body = header.expected_native64_body_size_bytes();
+  return header.body_size >= expected_body;
 }
 
 }  // namespace fastlanes

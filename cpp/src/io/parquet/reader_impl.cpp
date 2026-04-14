@@ -299,23 +299,48 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
                         streams[s_idx++]);
   }
 
-  // launch FastLanes bitpack decoder
-  // TODO: Consider splitting this into separate decoders for different FastLanes encodings (RAW32,
-  // SPLIT64, NATIVE64). Instead of merging all FastLanes decoding into one kernel with internal
-  // branching, we can have separate kernels for each encoding type. This would allow us to optimize
-  // each kernel for its specific encoding layout and reduce divergent execution paths within the
-  // kernel, potentially improving performance.
-  if (BitAnd(kernel_mask, decode_kernel_mask::FASTLANES_BINARY) != 0) {
-    auto const fastlanes_stream = streams[s_idx++];
-    decode_fastlanes_binary(subpass.pages,
-                            pass.chunks,
-                            num_rows,
-                            skip_rows,
-                            level_type_size,
-                            subpass_page_mask_span(),
-                            error_code.data(),
-                            fastlanes_stream);
-    // Explicit debug-dump launch is separated from decode so it cannot alter decode behavior.
+  auto const has_fastlanes_raw32 =
+    BitAnd(kernel_mask, decode_kernel_mask::FASTLANE_BITPACK_RAW) != 0;
+  auto const has_fastlanes_split64 =
+    BitAnd(kernel_mask, decode_kernel_mask::FASTLANE_BITPACK_SPLIT64) != 0;
+  auto const has_fastlanes_native64 =
+    BitAnd(kernel_mask, decode_kernel_mask::FASTLANES_DELTA_BINARY) != 0;
+
+  if (has_fastlanes_raw32) {
+    decode_fastlanes_raw32(subpass.pages,
+                           pass.chunks,
+                           num_rows,
+                           skip_rows,
+                           level_type_size,
+                           subpass_page_mask_span(),
+                           error_code.data(),
+                           streams[s_idx++]);
+  }
+
+  if (has_fastlanes_split64) {
+    decode_fastlanes_split64(subpass.pages,
+                             pass.chunks,
+                             num_rows,
+                             skip_rows,
+                             level_type_size,
+                             subpass_page_mask_span(),
+                             error_code.data(),
+                             streams[s_idx++]);
+  }
+
+  if (has_fastlanes_native64) {
+    decode_fastlanes_native64(subpass.pages,
+                              pass.chunks,
+                              num_rows,
+                              skip_rows,
+                              level_type_size,
+                              subpass_page_mask_span(),
+                              error_code.data(),
+                              streams[s_idx++]);
+  }
+
+  // Keep one explicit debug boundary independent from decode launches.
+  if (has_fastlanes_raw32 || has_fastlanes_split64 || has_fastlanes_native64) {
     debug_decode_fastlanes_binary(subpass.pages,
                                   pass.chunks,
                                   num_rows,
@@ -323,7 +348,7 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
                                   level_type_size,
                                   subpass_page_mask_span(),
                                   error_code.data(),
-                                  fastlanes_stream);
+                                  _stream);
   }
 
   // launch byte stream split decoder

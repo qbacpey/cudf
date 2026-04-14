@@ -2,6 +2,7 @@
 #include <cudf/fastlanes/fastlanes_encode.cuh>
 #include <cudf/fastlanes/fls_gen/pack/pack.hpp>
 #include <cudf/fastlanes/native64_cuda.cuh>
+#include <cudf/io/parquet_schema.hpp>
 
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
@@ -86,53 +87,26 @@ std::pair<fastlanes::TypeCastMode, bool> analyze_data(T const* data, uint32_t co
 template <typename T>
 uint8_t compute_bitwidth(unsigned_t<T> const* data, uint32_t count)
 {
-  // TODO: Consider merge all compute_bitwidth variants into one that takes max_val as argument to
-  // reduce code duplication For the computation of max_val, in the CPU side just use
-  // std::max_element for simplicity since it's a one-time linear scan and likely negligible in
-  // latency compared to the rest of the encoding process. For GPU side, if we want to compute
-  // max_val on GPU, we can use thrust::reduce with thrust::maximum to find the max value in a
-  // stream-aware manner.
-  unsigned_t<T> max_val = 0;
+  auto max_val = unsigned_t<T>{0};
   for (uint32_t i = 0; i < count; ++i) {
     if (data[i] > max_val) { max_val = data[i]; }
   }
 
-  if (max_val == 0) { return 1; }
-
   uint8_t bits = 0;
-  while (max_val > 0) {
+  do {
+    ++bits;
     max_val >>= 1;
-    bits++;
-  }
-  return bits;
-}
-
-uint8_t compute_bitwidth_u32(uint32_t const* data, uint32_t count)
-{
-  uint32_t max_val = 0;
-  for (uint32_t i = 0; i < count; ++i) {
-    if (data[i] > max_val) { max_val = data[i]; }
-  }
-
-  if (max_val == 0) { return 1; }
-
-  uint8_t bits = 0;
-  while (max_val > 0) {
-    max_val >>= 1;
-    bits++;
-  }
+  } while (max_val != 0);
   return bits;
 }
 
 uint8_t compute_bitwidth_u64(uint64_t max_val)
 {
-  if (max_val == 0) { return 1; }
-
   uint8_t bits = 0;
-  while (max_val > 0) {
+  do {
+    ++bits;
     max_val >>= 1;
-    bits++;
-  }
+  } while (max_val != 0);
   return bits;
 }
 
@@ -201,8 +175,8 @@ split32_page_data normalize_split32_page_data(int64_t const* data,
     page.high_deltas[i] = high - min_high;
   }
 
-  page.bitwidth_low  = compute_bitwidth_u32(page.low_deltas.data(), count);
-  page.bitwidth_high = compute_bitwidth_u32(page.high_deltas.data(), count);
+  page.bitwidth_low  = compute_bitwidth<uint32_t>(page.low_deltas.data(), count);
+  page.bitwidth_high = compute_bitwidth<uint32_t>(page.high_deltas.data(), count);
 
   if (!fastlanes::is_valid_bitwidth(page.bitwidth_low) ||
       !fastlanes::is_valid_bitwidth(page.bitwidth_high)) {
@@ -219,11 +193,6 @@ void encode_vectors(unsigned_t<T> const* input,
                     uint8_t bitwidth,
                     unsigned_t<T>* output)
 {
-  // TODO: Consider merge encode_vectors and encode_vectors_u32 into one function to reduce code
-  // duplication. Since now we can assume we would only call
-  // `generated::pack::fallback::scalar::pack(in_ptr, out_ptr, bitwidth);` for only uint32_t type.
-  // Or even just take this piece of code into the caller since it's just one line and the rest is
-  // vector loop scaffolding.
   uint64_t const n_vectors = fastlanes::num_vectors(padded);
   auto const* in_ptr       = input;
   auto* out_ptr            = output;
@@ -237,19 +206,34 @@ void encode_vectors(unsigned_t<T> const* input,
   }
 }
 
-void encode_vectors_u32(uint32_t const* input, uint64_t padded, uint8_t bitwidth, uint32_t* output)
+void maybe_print_encoded_page_debug(std::vector<uint8_t> const& host_blob,
+                                    fastlanes::TypeCastMode cast_mode,
+                                    bool debug_print,
+                                    bool include_payload_preview = true)
 {
-  uint64_t const n_vectors = fastlanes::num_vectors(padded);
-  auto const* in_ptr       = input;
-  auto* out_ptr            = output;
+  if (!debug_print || host_blob.empty()) { return; }
 
-  size_t const out_elements_per_vector = (fastlanes::VECTOR_SIZE * bitwidth) / 32;
+  auto const header = fastlanes::PageHeader::deserialize(host_blob.data());
+  auto info         = fastlanes::debug::make_debug_info(header);
+  info.cast_mode    = static_cast<uint8_t>(cast_mode);
 
-  for (uint64_t v = 0; v < n_vectors; ++v) {
-    generated::pack::fallback::scalar::pack(in_ptr, out_ptr, bitwidth);
-    in_ptr += fastlanes::VECTOR_SIZE;
-    out_ptr += out_elements_per_vector;
+  if (include_payload_preview && header.body_size >= sizeof(uint32_t)) {
+    auto const* payload_u32 = reinterpret_cast<uint32_t const*>(
+      fastlanes::PageHeader::payload_ptr(host_blob.data()));
+    auto const body_words = header.body_size / sizeof(uint32_t);
+    auto const preview_count =
+      body_words < fastlanes::debug::PageDebugInfo::MAX_PAYLOAD_PREVIEW_WORDS
+        ? body_words
+        : fastlanes::debug::PageDebugInfo::MAX_PAYLOAD_PREVIEW_WORDS;
+    for (uint32_t i = 0; i < preview_count; ++i) {
+      info.payload_preview[i] = payload_u32[i];
+    }
+    info.payload_preview_count = preview_count;
+  } else {
+    info.payload_preview_count = 0;
   }
+
+  fastlanes::debug::print_page_debug(std::cout, info);
 }
 
 template <typename T>
@@ -274,19 +258,6 @@ EncodedPageResult encode_scalar32_page(std::vector<T> const& host_input,
 
   encode_vectors<T>(normalized.values.data(), padded, bitwidth, encoded_body.data());
 
-  if (debug_print) {
-    using namespace fastlanes::debug;
-    PageDebugInfo info = make_debug_info(bitwidth,
-                                         cast_mode,
-                                         count,
-                                         static_cast<uint32_t>(padded),
-                                         encoded_bytes_u32,
-                                         normalized.min_value,
-                                         encoded_body.data(),
-                                         encoded_body.size());
-    print_page_debug(std::cout, info);
-  }
-
   result.host_blob =
     fastlanes::PageHeader::serialize_scalar32(bitwidth,
                                               count,
@@ -294,7 +265,7 @@ EncodedPageResult encode_scalar32_page(std::vector<T> const& host_input,
                                               static_cast<uint32_t>(normalized.min_value),
                                               reinterpret_cast<uint8_t const*>(encoded_body.data()),
                                               encoded_bytes_u32,
-                                              fastlanes::default_pre_delta_for_mode(false));
+                                              fastlanes::default_pre_delta_for_raw32());
   upload_encoded_blob(result, stream);
 
   result.bitwidth       = bitwidth;
@@ -304,6 +275,8 @@ EncodedPageResult encode_scalar32_page(std::vector<T> const& host_input,
   result.body_size      = encoded_bytes_u32;
   result.min_value      = normalized.min_value;
 
+  maybe_print_encoded_page_debug(result.host_blob, cast_mode, debug_print);
+
   return result;
 }
 
@@ -311,7 +284,8 @@ EncodedPageResult encode_split32_page(std::vector<int64_t> const& host_input,
                                       uint32_t count,
                                       uint64_t padded,
                                       fastlanes::TypeCastMode cast_mode,
-                                      rmm::cuda_stream_view stream)
+                                      rmm::cuda_stream_view stream,
+                                      bool debug_print)
 {
   EncodedPageResult result;
   auto split = normalize_split32_page_data(host_input.data(), count, static_cast<uint32_t>(padded));
@@ -326,8 +300,9 @@ EncodedPageResult encode_split32_page(std::vector<int64_t> const& host_input,
   std::vector<uint32_t> encoded_low(encoded_bytes_low / sizeof(uint32_t));
   std::vector<uint32_t> encoded_high(encoded_bytes_high / sizeof(uint32_t));
 
-  encode_vectors_u32(split.low_deltas.data(), padded, split.bitwidth_low, encoded_low.data());
-  encode_vectors_u32(split.high_deltas.data(), padded, split.bitwidth_high, encoded_high.data());
+  encode_vectors<uint32_t>(split.low_deltas.data(), padded, split.bitwidth_low, encoded_low.data());
+  encode_vectors<uint32_t>(
+    split.high_deltas.data(), padded, split.bitwidth_high, encoded_high.data());
 
   std::vector<uint8_t> encoded_body(encoded_body_bytes);
   if (encoded_bytes_low > 0) {
@@ -348,7 +323,7 @@ EncodedPageResult encode_split32_page(std::vector<int64_t> const& host_input,
                                              split.min_high_bits,
                                              encoded_body.data(),
                                              encoded_body_size_u32,
-                                             fastlanes::default_pre_delta_for_mode(true));
+                                             fastlanes::default_pre_delta_for_split64());
   upload_encoded_blob(result, stream);
 
   result.bitwidth =
@@ -360,6 +335,46 @@ EncodedPageResult encode_split32_page(std::vector<int64_t> const& host_input,
   result.min_value =
     (static_cast<uint64_t>(split.min_high_bits) << 32) | static_cast<uint64_t>(split.min_low_bits);
 
+  maybe_print_encoded_page_debug(result.host_blob, cast_mode, debug_print);
+
+  return result;
+}
+
+EncodedPageResult create_empty_result(Encoding encoding, rmm::cuda_stream_view stream)
+{
+  EncodedPageResult result;
+  result.bitwidth       = 1;
+  result.cast_mode      = fastlanes::TypeCastMode::SIGNED_SAFE;
+  result.original_count = 0;
+  result.padded_count   = 0;
+  result.body_size      = 0;
+  result.min_value      = 0;
+
+  switch (encoding) {
+    case Encoding::FASTLANE_BITPACK_RAW:
+      result.host_blob = fastlanes::PageHeader::serialize_scalar32(
+        1, 0, 0, 0, nullptr, 0, fastlanes::default_pre_delta_for_raw32());
+      break;
+    case Encoding::FASTLANE_BITPACK_SPLIT64:
+      result.host_blob = fastlanes::PageHeader::serialize_split32(
+        1, 1, 0, 0, 0, 0, nullptr, 0, fastlanes::default_pre_delta_for_split64());
+      break;
+    case Encoding::FASTLANES_DELTA_BINARY:
+      result.host_blob = fastlanes::PageHeader::serialize_native64(
+        1, 0, 0, 0, nullptr, 0, fastlanes::default_pre_delta_for_native64());
+      break;
+    default:
+      throw std::invalid_argument("FastLanesEncoder: unsupported encoding for empty-page layout");
+  }
+
+  result.device_blob = rmm::device_buffer(result.host_blob.size(), stream);
+  cuda_check(cudaMemcpyAsync(result.device_blob.data(),
+                             result.host_blob.data(),
+                             result.host_blob.size(),
+                             cudaMemcpyHostToDevice,
+                             stream.value()),
+             "upload empty blob");
+
   return result;
 }
 
@@ -368,28 +383,7 @@ EncodedPageResult encode_split32_page(std::vector<int64_t> const& host_input,
  */
 EncodedPageResult create_empty_scalar32_result(rmm::cuda_stream_view stream)
 {
-  // TODO: Consider merge all the create_empty_*_result functions into one that takes an encoding
-  // type enum to reduce code duplication.
-  EncodedPageResult result;
-  result.bitwidth       = 1;
-  result.cast_mode      = fastlanes::TypeCastMode::SIGNED_SAFE;
-  result.original_count = 0;
-  result.padded_count   = 0;
-  result.body_size      = 0;
-  result.min_value      = 0;
-
-  result.host_blob = fastlanes::PageHeader::serialize_scalar32(
-    1, 0, 0, 0, nullptr, 0, fastlanes::default_pre_delta_for_mode(false));
-
-  result.device_blob = rmm::device_buffer(result.host_blob.size(), stream);
-  cuda_check(cudaMemcpyAsync(result.device_blob.data(),
-                             result.host_blob.data(),
-                             result.host_blob.size(),
-                             cudaMemcpyHostToDevice,
-                             stream.value()),
-             "upload empty blob");
-
-  return result;
+  return create_empty_result(Encoding::FASTLANE_BITPACK_RAW, stream);
 }
 
 /**
@@ -397,26 +391,7 @@ EncodedPageResult create_empty_scalar32_result(rmm::cuda_stream_view stream)
  */
 EncodedPageResult create_empty_split32_result(rmm::cuda_stream_view stream)
 {
-  EncodedPageResult result;
-  result.bitwidth       = 1;
-  result.cast_mode      = fastlanes::TypeCastMode::SIGNED_SAFE;
-  result.original_count = 0;
-  result.padded_count   = 0;
-  result.body_size      = 0;
-  result.min_value      = 0;
-
-  result.host_blob = fastlanes::PageHeader::serialize_split32(
-    1, 1, 0, 0, 0, 0, nullptr, 0, fastlanes::default_pre_delta_for_mode(true));
-
-  result.device_blob = rmm::device_buffer(result.host_blob.size(), stream);
-  cuda_check(cudaMemcpyAsync(result.device_blob.data(),
-                             result.host_blob.data(),
-                             result.host_blob.size(),
-                             cudaMemcpyHostToDevice,
-                             stream.value()),
-             "upload empty blob");
-
-  return result;
+  return create_empty_result(Encoding::FASTLANE_BITPACK_SPLIT64, stream);
 }
 
 /**
@@ -424,26 +399,7 @@ EncodedPageResult create_empty_split32_result(rmm::cuda_stream_view stream)
  */
 EncodedPageResult create_empty_native64_result(rmm::cuda_stream_view stream)
 {
-  EncodedPageResult result;
-  result.bitwidth       = 1;
-  result.cast_mode      = fastlanes::TypeCastMode::SIGNED_SAFE;
-  result.original_count = 0;
-  result.padded_count   = 0;
-  result.body_size      = 0;
-  result.min_value      = 0;
-
-  result.host_blob = fastlanes::PageHeader::serialize_native64(
-    1, 0, 0, 0, nullptr, 0, fastlanes::default_pre_delta_for_mode(false));
-
-  result.device_blob = rmm::device_buffer(result.host_blob.size(), stream);
-  cuda_check(cudaMemcpyAsync(result.device_blob.data(),
-                             result.host_blob.data(),
-                             result.host_blob.size(),
-                             cudaMemcpyHostToDevice,
-                             stream.value()),
-             "upload empty blob");
-
-  return result;
+  return create_empty_result(Encoding::FASTLANES_DELTA_BINARY, stream);
 }
 
 /**
@@ -481,8 +437,6 @@ EncodedPageResult encode_split32_page_helper(int64_t const* d_input,
                                              rmm::cuda_stream_view stream,
                                              bool debug_print)
 {
-  static_cast<void>(debug_print);
-
   if (count == 0) { return create_empty_split32_result(stream); }
 
   if (d_input == nullptr) {
@@ -499,7 +453,7 @@ EncodedPageResult encode_split32_page_helper(int64_t const* d_input,
   cuda_check(cudaStreamSynchronize(stream.value()), "stream synchronize after download");
 
   auto const cast_mode = analyze_data(host_input.data(), count).first;
-  return encode_split32_page(host_input, count, padded, cast_mode, stream);
+  return encode_split32_page(host_input, count, padded, cast_mode, stream, debug_print);
 }
 
 /**
@@ -510,8 +464,6 @@ EncodedPageResult encode_native64_page_helper(int64_t const* d_input,
                                               rmm::cuda_stream_view stream,
                                               bool debug_print)
 {
-  static_cast<void>(debug_print);
-
   if (count == 0) { return create_empty_native64_result(stream); }
 
   if (d_input == nullptr) {
@@ -534,6 +486,18 @@ EncodedPageResult encode_native64_page_helper(int64_t const* d_input,
     uint64_t{0},
     thrust::maximum<uint64_t>{});
 
+  auto const has_negative = thrust::transform_reduce(
+    rmm::exec_policy(stream),
+    idx_begin,
+    idx_end,
+    [d_input_u64] __device__(uint32_t idx) -> bool {
+      return (d_input_u64[idx] & (uint64_t{1} << 63)) != 0;
+    },
+    false,
+    thrust::logical_or<bool>{});
+  auto const cast_mode = has_negative ? fastlanes::TypeCastMode::SIGNED_REINTERPRET
+                                      : fastlanes::TypeCastMode::SIGNED_SAFE;
+
   auto const bitwidth = compute_bitwidth_u64(max_delta);
 
   auto const padded_count      = static_cast<uint32_t>(fastlanes::padded_count(count));
@@ -554,22 +518,22 @@ EncodedPageResult encode_native64_page_helper(int64_t const* d_input,
              "copy native64 input");
 
   EncodedPageResult result;
-  result.host_blob =
-    fastlanes::PageHeader::serialize_native64(bitwidth,
-                                              count,
-                                              padded_count,
-                                              min_value_bits,
-                                              nullptr,
-                                              encoded_body_size,
-                                              fastlanes::default_pre_delta_for_mode(false));
-  // TODO: In this place using host_blob as staging for header bytes is a bit awkward since the body
-  // encoding is GPU-only. Consider refactor into host_header_block & host_body_block for clearer
-  // separation of host vs device responsibilities.
-  result.device_blob = rmm::device_buffer(result.host_blob.size(), stream);
+  auto const serialized_layout = fastlanes::PageHeader::serialize_native64(
+    bitwidth,
+    count,
+    padded_count,
+    min_value_bits,
+    nullptr,
+    encoded_body_size,
+    fastlanes::default_pre_delta_for_native64());
 
   auto const header_size = fastlanes::PageHeader::header_size();
+  result.host_blob.assign(serialized_layout.size(), uint8_t{0});
+  std::memcpy(result.host_blob.data(), serialized_layout.data(), header_size);
+
+  result.device_blob = rmm::device_buffer(result.host_blob.size(), stream);
   cuda_check(cudaMemcpyAsync(result.device_blob.data(),
-                             result.host_blob.data(),
+                             serialized_layout.data(),
                              header_size,
                              cudaMemcpyHostToDevice,
                              stream.value()),
@@ -581,11 +545,14 @@ EncodedPageResult encode_native64_page_helper(int64_t const* d_input,
     bitwidth, padded_input.data(), payload_device_ptr, min_value_bits, count, stream.value());
 
   result.bitwidth       = bitwidth;
-  result.cast_mode      = fastlanes::TypeCastMode::SIGNED_SAFE;
+  result.cast_mode      = cast_mode;
   result.original_count = count;
   result.padded_count   = padded_count;
   result.body_size      = encoded_body_size;
   result.min_value      = min_value_bits;
+
+  // Native64 payload is produced directly on device, so host_blob carries header-only preview data.
+  maybe_print_encoded_page_debug(result.host_blob, cast_mode, debug_print, false);
 
   return result;
 }

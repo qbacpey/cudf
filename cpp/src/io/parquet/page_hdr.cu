@@ -212,10 +212,12 @@ __device__ decode_kernel_mask kernel_mask_for_page(PageInfo const& page,
 {
   if (page.flags & PAGEINFO_FLAGS_DICTIONARY) { return decode_kernel_mask::NONE; }
 
-  if (page.encoding == Encoding::FASTLANE_BITPACK_RAW ||
-      page.encoding == Encoding::FASTLANE_BITPACK_SPLIT64 ||
-      page.encoding == Encoding::FASTLANES_DELTA_BINARY) {
-    return decode_kernel_mask::FASTLANES_BINARY;
+  if (page.encoding == Encoding::FASTLANE_BITPACK_RAW) {
+    return decode_kernel_mask::FASTLANE_BITPACK_RAW;
+  } else if (page.encoding == Encoding::FASTLANE_BITPACK_SPLIT64) {
+    return decode_kernel_mask::FASTLANE_BITPACK_SPLIT64;
+  } else if (page.encoding == Encoding::FASTLANES_DELTA_BINARY) {
+    return decode_kernel_mask::FASTLANES_DELTA_BINARY;
   } else if (page.encoding == Encoding::DELTA_BINARY_PACKED) {
     return decode_kernel_mask::DELTA_BINARY;
   } else if (page.encoding == Encoding::DELTA_BYTE_ARRAY) {

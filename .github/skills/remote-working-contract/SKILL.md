@@ -47,7 +47,6 @@ Build rule:
 3. If build fails due `/tmp` pressure on fng01, set:
    `export TMPDIR=/home/qchen/04_GPUFileFormat-cudf/tmpbuild`
    `mkdir -p "$TMPDIR"`
-   `export PARALLEL_LEVEL=4`
    then rerun `${CUDF_HOME}/build.sh` from `${CUDF_HOME}`.
 
 Writer test binary rule:
