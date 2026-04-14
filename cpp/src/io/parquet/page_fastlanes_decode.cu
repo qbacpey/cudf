@@ -29,6 +29,7 @@
 
 #include <cooperative_groups.h>
 
+#include <cstring>
 #include <string>
 
 namespace native64_generated {
@@ -196,10 +197,10 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
     // Stage packed words into aligned shared memory before calling generated unpack code,
     // which expects uint32_t-aligned inputs.
     for (uint32_t w = lane; w < packed_words_per_vector; w += decode_fastlanes_block_size) {
-      auto const* b         = vector_input_bytes + static_cast<size_t>(w) * sizeof(uint32_t);
-      packed_vec_aligned[w] = (static_cast<uint32_t>(b[0])) | (static_cast<uint32_t>(b[1]) << 8) |
-                              (static_cast<uint32_t>(b[2]) << 16) |
-                              (static_cast<uint32_t>(b[3]) << 24);
+      auto const* b = vector_input_bytes + static_cast<size_t>(w) * sizeof(uint32_t);
+      uint32_t temp;
+      memcpy(&temp, b, sizeof(uint32_t));
+      packed_vec_aligned[w] = temp;
     }
     block.sync();
 
@@ -306,15 +307,15 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
 
     for (uint32_t w = lane; w < packed_words_per_vector_low; w += decode_fastlanes_block_size) {
       auto const* b = packed_low_bytes + static_cast<size_t>(w) * sizeof(uint32_t);
-      packed_vec_low_aligned[w] =
-        (static_cast<uint32_t>(b[0])) | (static_cast<uint32_t>(b[1]) << 8) |
-        (static_cast<uint32_t>(b[2]) << 16) | (static_cast<uint32_t>(b[3]) << 24);
+      uint32_t temp;
+      memcpy(&temp, b, sizeof(uint32_t));
+      packed_vec_low_aligned[w] = temp;
     }
     for (uint32_t w = lane; w < packed_words_per_vector_high; w += decode_fastlanes_block_size) {
       auto const* b = packed_high_bytes + static_cast<size_t>(w) * sizeof(uint32_t);
-      packed_vec_high_aligned[w] =
-        (static_cast<uint32_t>(b[0])) | (static_cast<uint32_t>(b[1]) << 8) |
-        (static_cast<uint32_t>(b[2]) << 16) | (static_cast<uint32_t>(b[3]) << 24);
+      uint32_t temp;
+      memcpy(&temp, b, sizeof(uint32_t));
+      packed_vec_high_aligned[w] = temp;
     }
     block.sync();
 
@@ -430,11 +431,9 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
 
       for (uint32_t w = sublane; w < packed_words_per_vector; w += native64_lanes_per_vector) {
         auto const* b = vector_input_bytes + static_cast<size_t>(w) * sizeof(uint64_t);
-        packed_words[w] =
-          (static_cast<uint64_t>(b[0])) | (static_cast<uint64_t>(b[1]) << 8) |
-          (static_cast<uint64_t>(b[2]) << 16) | (static_cast<uint64_t>(b[3]) << 24) |
-          (static_cast<uint64_t>(b[4]) << 32) | (static_cast<uint64_t>(b[5]) << 40) |
-          (static_cast<uint64_t>(b[6]) << 48) | (static_cast<uint64_t>(b[7]) << 56);
+        uint64_t temp;
+        memcpy(&temp, b, sizeof(uint64_t));
+        packed_words[w] = temp;
       }
     }
     block.sync();
