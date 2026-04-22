@@ -67,6 +67,7 @@ cudf::io::column_encoding get_encoding_type(std::string name)
     {"DIRECT_V2", encoding_type::DIRECT_V2},
     {"DICTIONARY_V2", encoding_type::DICTIONARY_V2},
     {"FASTLANE_BITPACK_RAW", encoding_type::FASTLANE_BITPACK_RAW},
+    {"FASTLANES_DELTA_BINARY", encoding_type::FASTLANES_DELTA_BINARY},
     {"FASTLANE_BITPACK_SPLIT64", encoding_type::FASTLANE_BITPACK_SPLIT64}
   };
 
@@ -93,6 +94,7 @@ std::string get_encoding_string(cudf::io::column_encoding encoding)
     case cudf::io::column_encoding::DIRECT_V2: return "DIRECT_V2";
     case cudf::io::column_encoding::DICTIONARY_V2: return "DICTIONARY_V2";
     case cudf::io::column_encoding::FASTLANE_BITPACK_RAW: return "FASTLANE_BITPACK_RAW";
+    case cudf::io::column_encoding::FASTLANES_DELTA_BINARY: return "FASTLANES_DELTA_BINARY";
     case cudf::io::column_encoding::FASTLANE_BITPACK_SPLIT64: return "FASTLANE_BITPACK_SPLIT64";
     default: return "UNKNOWN_ENCODING";
   }

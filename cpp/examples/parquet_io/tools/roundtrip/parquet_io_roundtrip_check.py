@@ -31,9 +31,9 @@ Example:
         --cpp-binary ./build/parquet_io_chunk \
         --validator auto
     
-    ./parquet_io_roundtrip_check.py --input lineitem.parquet --conversion-engine cpp --cpp-binary ./build/parquet_io_chunk --validator auto --keep-output --encoding-spec "l_orderkey:DELTA_BINARY_PACKED,\
-        l_partkey:DELTA_BINARY_PACKED,\
-        l_suppkey:DELTA_BINARY_PACKED,\
+    ./parquet_io_roundtrip_check.py --input /home/qchen/04_GPUFileFormat-cudf/large_input/0003-cudf-DELTA.parquet --conversion-engine cpp --cpp-binary ./build/parquet_io_chunk --validator auto --keep-output --encoding-spec "l_orderkey:DELTA_BINARY_PACKED,\
+        l_partkey:FASTLANES_DELTA_BINARY,\
+        l_suppkey:FASTLANES_DELTA_BINARY,\
         l_linenumber:DICTIONARY,\
         l_quantity:DICTIONARY,\
         l_extendedprice:DELTA_BINARY_PACKED,\

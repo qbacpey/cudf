@@ -1,3 +1,5 @@
+Impl this script for me, since my local env doesn't have GPU, all the build and testing should be done in the remote. vscode-remote://wsl+ubuntu/home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/.github/skills/remote-working-contract/SKILL.md:
+
 ## Plan: FastLanes Parquet Refactor Hard-Cutover
 
 Comprehensive staged plan to implement host/device API separation, encoder file split with namespace cleanup, and page-encoder batching refactor with strict parity constraints. This plan follows remote GPU execution constraints on fng01, uses small reversible micro-runs, enforces direct hard cutovers, and validates each run with build + PARQUET_TEST + PARQUET_FASTLANES_TEST.
@@ -7,7 +9,7 @@ Comprehensive staged plan to implement host/device API separation, encoder file 
 - Compatibility: direct hard cutover (no temporary production aliases/wrappers).
 - Invariants: bit-for-bit payload parity, page-header parity, and no new per-page stream synchronizations.
 - Validation cadence: each micro-run runs libcudf build + full PARQUET_TEST + PARQUET_FASTLANES_TEST.
-- Milestone cadence: full libcudf ctest suite at end of phases 1, 2, and 3.
+- Milestone cadence: full libcudf ctest suite at end of phases 1, 2, and 3, plus end-to-end file validation using tooling.
 - Namespace target: `cudf::io::parquet::detail::fastlanes::native64` for native64 internals.
 - A/B parity approach: dual-path test-only harness during phase 3; remove test-only legacy hooks at phase 3 close.
 
@@ -24,7 +26,7 @@ Comprehensive staged plan to implement host/device API separation, encoder file 
 ### Dependency Graph
 - FL-P1-R1 -> FL-P1-R2 -> FL-P1-R3 -> Phase-1 Milestone
 - FL-P2-R1 -> FL-P2-R2 -> Phase-2 Milestone
-- FL-P3-R1 -> FL-P3-R2 -> FL-P3-R3 -> FL-P3-R4 -> Phase-3 Milestone
+- FL-P3-R1 -> FL-P3-R2 -> FL-P3-R3 -> FL-P3-R4 -> FL-P3-R5 -> Phase-3 Milestone
 - Parallelism: none for production edits (high coupling). Validation artifact summarization can run in parallel with non-blocking report generation.
 
 ### Micro-Runs
@@ -210,12 +212,27 @@ Phase 2 Milestone Gate
 - Rollback trigger: coverage drop or inability to prove parity on final path.
 - Evidence: cleanup diff + test pass summary.
 
+10. FL-P3-R5: End-to-End File Generation and Tool Validation
+- Goal: Create a real Parquet file encoded with FastLanes native64 and validate its effect and correctness using external tooling.
+- Depends on: FL-P3-R4.
+- Editable scope:
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/examples/parquet_io/tools/ (if minor script wiring is needed)
+  - Integration tests or execution scripts calling the tool.
+- Concrete edits:
+  - Use cuDF to generate a dummy dataset comprising supported types and write it to a Parquet file with FastLanes enabled.
+  - Invoke the inspection/verification scripts residing in `cpp/examples/parquet_io/tools` on the generated file.
+- Validation: The script runs to completion, accurately parses the physical/logical types, and verifies the native64 encoded payload matches expected decoded output.
+- Acceptance: The tool confirms correct file formatting and correctly decodes the FastLanes pages.
+- Rollback trigger: Tooling crashes upon reading the file or reports data corruption/mismatch.
+- Evidence: Tool output log validating the Parquet metadata and payload.
+
 Phase 3 Milestone Gate
 - Commands:
   - build.sh libcudf
   - build.sh libcudf tests
   - cpp/build && ctest --output-on-failure
-- Exit requirement: full libcudf ctest pass.
+  - Generate a test Parquet file and run `cpp/examples/parquet_io/tools/<validation_script>` against it.
+- Exit requirement: full libcudf ctest pass, AND successful script validation of the generated FastLanes Parquet file.
 
 ### Relevant Files
 - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_host.hpp — host launch API declarations.
@@ -235,6 +252,7 @@ Phase 3 Milestone Gate
 - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/tests/CMakeLists.txt — test source wiring updates.
 - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/tests/io/parquet_fastlanes_test.cpp — parity A/B and final refactor coverage.
 - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/tests/io/parquet_fastlanes_native64_generated_test.cu — native64 API usage updates.
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/examples/parquet_io/tools/ — directory containing scripts for testing the effect and correctness of the encoded outputs.
 
 ### Risk Matrix
 - High: namespace cutover breaks decode/runtime symbol lookups.
@@ -249,6 +267,9 @@ Phase 3 Milestone Gate
 - Medium: stream synchronization remains hidden in loop.
   - Detection: source audit and targeted tests around run_fastlanes_cpu_encode path.
   - Mitigation: explicit sync audit in FL-P3-R3 acceptance checks.
+- Medium: The generated files are unreadable by third-party or generic toolings due to FastLanes metadata anomalies.
+  - Detection: `cpp/examples/parquet_io/tools/` validation scripts crash or complain about malformed data.
+  - Mitigation: The newly added FL-P3-R5 ensures an external check guarantees interoperability/correctness natively.
 
 ### Included vs Excluded Scope
 - Included:
@@ -256,6 +277,7 @@ Phase 3 Milestone Gate
   - FastLanes encoder implementation split and namespace migration.
   - Parquet page encode stage refactor for categorize/batch/finalize.
   - CMake/test wiring and parity tests required to validate refactor.
+  - End-to-end file generation and validation utilizing the `cpp/examples/parquet_io/tools` scripts.
 - Excluded:
   - New feature work beyond requested architectural refactor.
   - Python bindings and non-Parquet IO stacks.
