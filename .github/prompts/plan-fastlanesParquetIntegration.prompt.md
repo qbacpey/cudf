@@ -1,4 +1,4 @@
-Impl this script for me, since my local env doesn't have GPU, all the build and testing should be done in the remote. vscode-remote://wsl+ubuntu/home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/.github/skills/remote-working-contract/SKILL.md:
+Implement this plan for me under the remote-working contract in [SKILL.md](/home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/.github/skills/remote-working-contract/SKILL.md). My local environment does not have a GPU, so all build and test execution must happen remotely on `qchen@fng01.lab.tuda.systems`. Read and apply the required task variables first: `TARGET_BRANCH=fastlane-working`, `INPUT_PATTERN`, and `RUN_TAG`.
 
 ## Plan: FastLanes Parquet Refactor Hard-Cutover
 
@@ -14,6 +14,7 @@ Comprehensive staged plan to implement host/device API separation, encoder file 
 - A/B parity approach: dual-path test-only harness during phase 3; remove test-only legacy hooks at phase 3 close.
 
 ### Execution Envelope (Remote Contract)
+0. Read task variables first: `TARGET_BRANCH=fastlane-working`, `INPUT_PATTERN`, and `RUN_TAG`.
 1. Use existing terminal; verify hostname/user first.
 2. If local shell: ssh to qchen@fng01.lab.tuda.systems.
 3. Set remote env in order: source conda.sh -> conda activate cudf_dev -> export CPATH.
@@ -21,7 +22,8 @@ Comprehensive staged plan to implement host/device API separation, encoder file 
 5. Build from ${CUDF_HOME} using ${CUDF_HOME}/build.sh only.
 6. If /tmp pressure: set TMPDIR, mkdir -p TMPDIR, set PARALLEL_LEVEL=4, rerun build.sh.
 7. Symbol checks use rg -n; fallback to grep -nE if rg unavailable.
-8. Report each run with exact commands, paths, rg/grep mode, and archive status fields.
+8. After runs, sync small report content back locally with `/home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/sync_parquet_io_shared_small.sh pull`; keep large parquet/csv artifacts remote only.
+9. Report each run with exact commands, paths, rg/grep mode, archive status fields, and final report/artifact/output locations.
 
 ### Dependency Graph
 - FL-P1-R1 -> FL-P1-R2 -> FL-P1-R3 -> Phase-1 Milestone

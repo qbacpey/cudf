@@ -29,12 +29,12 @@ uint64_t derive_min_base_bits(uint64_t const* values,
  * @param total_count Total number of values
  * @param stream CUDA stream to use for the operation
  */
-void encode_by_bw_gpu_device_ptrs(uint8_t bw,
-                                  uint64_t const* values,
-                                  uint64_t* packed,
-                                  uint64_t base_bits,
-                                  uint32_t total_count,
-                                  cudaStream_t stream);
+void launch_native64_encode(uint8_t bw,
+                            uint64_t const* values,
+                            uint64_t* packed,
+                            uint64_t base_bits,
+                            uint32_t total_count,
+                            cudaStream_t stream);
 
 /**
  * @brief Decode the given packed values using the FastLanes Native64 encoding strategy on the GPU.
@@ -45,11 +45,11 @@ void encode_by_bw_gpu_device_ptrs(uint8_t bw,
  * @param total_count Total number of values
  * @param stream CUDA stream to use for the operation
  */
-void decode_by_bw_gpu_device_ptrs(uint8_t bw,
-                                  uint64_t const* packed,
-                                  uint64_t* decoded,
-                                  uint64_t base_bits,
-                                  uint32_t total_count,
-                                  cudaStream_t stream);
+void launch_native64_decode(uint8_t bw,
+                            uint64_t const* packed,
+                            uint64_t* decoded,
+                            uint64_t base_bits,
+                            uint32_t total_count,
+                            cudaStream_t stream);
 
 }  // namespace native64_generated

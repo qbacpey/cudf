@@ -1,6 +1,6 @@
 #include <cudf/fastlanes/fastlanes_encode.cuh>
 #include <cudf/fastlanes/fls_gen/pack/pack.hpp>
-#include <cudf/fastlanes/native64_cuda.cuh>
+#include <cudf/fastlanes/native64_host.hpp>
 #include <cudf/io/parquet_schema.hpp>
 
 #include <rmm/device_uvector.hpp>
@@ -467,7 +467,7 @@ EncodedPageResult encode_native64_page_helper(int64_t const* d_input,
 
   rmm::device_uvector<uint64_t> padded_input(padded_count, stream);
   // Filling with min_value_bits to ensure that padding does not introduce larger deltas that could
-  // affect bitwidth calculation in encode_by_bw_gpu_device_ptrs.
+  // affect bitwidth calculation in launch_native64_encode.
   thrust::fill(rmm::exec_policy(stream), padded_input.begin(), padded_input.end(), min_value_bits);
   cuda_check(cudaMemcpyAsync(padded_input.data(),
                              d_input_u64,
@@ -500,7 +500,7 @@ EncodedPageResult encode_native64_page_helper(int64_t const* d_input,
 
   auto* payload_device_ptr = reinterpret_cast<uint64_t*>(
     fastlanes::PageHeader::payload_ptr(static_cast<uint8_t*>(result.device_blob.data())));
-  native64_generated::encode_by_bw_gpu_device_ptrs(
+  native64_generated::launch_native64_encode(
     bitwidth, padded_input.data(), payload_device_ptr, min_value_bits, count, stream.value());
 
   result.bitwidth       = bitwidth;

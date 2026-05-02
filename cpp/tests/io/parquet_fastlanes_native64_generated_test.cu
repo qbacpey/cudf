@@ -8,7 +8,7 @@
 #include <cudf/fastlanes/common.cuh>
 #include <cudf/fastlanes/fls_gen/pack/pack.hpp>
 #include <cudf/fastlanes/fls_gen/unpack/unpack.hpp>
-#include <cudf/fastlanes/native64_cuda.cuh>
+#include <cudf/fastlanes/native64_host.hpp>
 #include <cudf/utilities/default_stream.hpp>
 
 #include <cuda_runtime_api.h>
@@ -308,7 +308,7 @@ namespace native64_generated_test {
     }
   }
 
-  ::native64_generated::encode_by_bw_gpu_device_ptrs(
+  ::native64_generated::launch_native64_encode(
     bw, d_values, d_packed, base_bits, total_count, stream.value());
 
   auto const sync_status = cudaStreamSynchronize(stream.value());
@@ -411,7 +411,7 @@ namespace native64_generated_test {
     }
   }
 
-  ::native64_generated::decode_by_bw_gpu_device_ptrs(
+  ::native64_generated::launch_native64_decode(
     bw, d_packed, d_decoded, base_bits, total_count, stream.value());
 
   auto const sync_status = cudaStreamSynchronize(stream.value());

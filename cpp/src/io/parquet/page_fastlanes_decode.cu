@@ -26,18 +26,11 @@
 #include <cudf/detail/utilities/cuda.cuh>
 #include <cudf/fastlanes/common.cuh>
 #include <cudf/fastlanes/fls_gen/unpack/unpack.cuh>
+#include <cudf/fastlanes/native64_device.cuh>
 
 #include <cooperative_groups.h>
 
 #include <cstring>
-#include <string>
-
-namespace native64_generated {
-[[nodiscard]] std::string cuda_error(cudaError_t status, char const* operation);
-}  // namespace native64_generated
-// Native64 decode needs generated runtime device dispatch. Keep this include scoped to the
-// FastLanes decode translation unit to avoid exposing generated internals broadly.
-#include <cudf/fastlanes/native64_cuda_kernels.inl>
 
 namespace cudf::io::parquet::detail {
 

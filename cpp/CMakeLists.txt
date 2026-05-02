@@ -414,7 +414,7 @@ endif()
 add_library(
   cudf
   src/fastlanes/fastlanes.cu
-  src/fastlanes/native64_cuda.cu
+  src/fastlanes/native64_host.cu
   src/fastlanes/ffor.cpp
   src/fastlanes/ffor_wrappers.cpp
   src/fastlanes/pack.cpp

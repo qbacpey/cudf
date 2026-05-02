@@ -351,7 +351,7 @@ ConfigureTest(
   io/parquet_fastlanes_native64_bw37_test.cu
   io/parquet_fastlanes_native64_generated_test.cu
   io/parquet_fastlanes_test.cpp
-  ../src/fastlanes/native64_cuda.cu
+  ../src/fastlanes/native64_host.cu
   ../src/fastlanes/pack.cpp
   ../src/fastlanes/unpack.cpp
   GPUS 1
