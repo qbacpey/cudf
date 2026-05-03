@@ -3,10 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#pragma once
-
-#include "fastlanes_parquet_common.cuh"
-
 namespace fastlanes_encode_stage {
 
 namespace parquet_fastlanes = cudf::io::parquet::detail::fastlanes;

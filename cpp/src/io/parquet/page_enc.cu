@@ -5,6 +5,7 @@
 
 #include "delta_enc.cuh"
 #include "fastlanes_parquet_common.cuh"
+#include "fastlanes_page_encoder.hpp"
 #include "io/parquet/parquet_gpu.hpp"
 #include "io/utilities/block_utils.cuh"
 #include "page_string_utils.cuh"
@@ -3717,12 +3718,9 @@ void InitEncoderPages(device_2dspan<EncColumnChunk> chunks,
                                                                    write_v2_headers);
 }
 
-namespace {
-// FastLanes encode staging helpers are split into a dedicated file to keep this
-// translation unit focused on top-level page encode orchestration.
-#include "page_enc_fastlanes_stage.cuh"
-
-}  // namespace
+// FastLanes encode staging helpers stay source-included because they launch local templated
+// kernels defined in this translation unit.
+#include "fastlanes_page_encoder.cu"
 
 void EncodePages(device_span<EncPage> pages,
                  bool write_v2_headers,

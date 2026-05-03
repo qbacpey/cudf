@@ -165,6 +165,7 @@ Phase 2 Milestone Gate
   - Move current run_fastlanes_cpu_encode implementation into new .cu as-is.
   - New .hpp keeps declarations only under cudf::io::parquet::detail.
   - Update include/call site in page_enc.cu.
+  - If the moved implementation still depends on local templated kernels private to page_enc.cu, keep the new .cu source-included from page_enc.cu instead of compiling it as an independent TU.
 - Validation: per-run tests.
 - Acceptance: pure relocation with parity preserved.
 - Rollback trigger: new TU link failure or include ordering break.
