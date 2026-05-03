@@ -874,7 +874,7 @@ CUDF_KERNEL void __launch_bounds__(128)
                                            fastlanes_component_streams / size_t{8};
           auto const fastlanes_reserved_size =
             is_fastlanes_mask(column_data_encoding)
-              ? fastlanes::PageHeader::header_size() +
+              ? ::fastlanes::PageHeader::header_size() +
                   fastlanes_body_size
               : size_t{0};
           auto const reserved_data_size = max(max_data_size, fastlanes_reserved_size);

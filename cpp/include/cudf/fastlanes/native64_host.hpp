@@ -9,7 +9,7 @@
 
 #include <cstdint>
 
-namespace native64_generated {
+namespace cudf::io::parquet::detail::fastlanes::native64 {
 /**
  * @brief Derive the minimum base bits required to encode the given values with the FastLanes Native64 encoding strategy.
  * @param values Pointer to the input values on the GPU
@@ -52,4 +52,4 @@ void launch_native64_decode(uint8_t bw,
                             uint32_t total_count,
                             cudaStream_t stream);
 
-}  // namespace native64_generated
+}  // namespace cudf::io::parquet::detail::fastlanes::native64

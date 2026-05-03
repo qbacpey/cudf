@@ -5,7 +5,7 @@
  * Source metadata helper: cpp/examples/parquet_io/tools/tests/run_parity_matrix.py
  */
 
-namespace native64_generated {
+namespace cudf::io::parquet::detail::fastlanes::native64 {
 
 constexpr uint32_t kVectorSize     = 1024;
 constexpr uint32_t kLanesPerVector = 16;
@@ -35,8 +35,8 @@ __device__ __forceinline__ void encode_lane_native64(uint64_t const* __restrict 
     return;
   } else {
     constexpr uint32_t kWordsPerLane =
-      fastlanes::words_per_lane_for_bw<BW>(kVectorSize, kLanesPerVector);
-    constexpr uint64_t kMask = fastlanes::mask_for_bw<BW>();
+      ::fastlanes::words_per_lane_for_bw<BW>(kVectorSize, kLanesPerVector);
+    constexpr uint64_t kMask = ::fastlanes::mask_for_bw<BW>();
 
     uint64_t words[kWordsPerLane] = {};
 
@@ -72,7 +72,7 @@ __device__ __forceinline__ void decode_lane_native64(uint64_t const* __restrict 
       vector_out[out_idx] = base_bits;
     }
   } else {
-    constexpr uint64_t kMask = fastlanes::mask_for_bw<BW>();
+    constexpr uint64_t kMask = ::fastlanes::mask_for_bw<BW>();
 
     for (uint32_t i = 0; i < kValuesPerLane; ++i) {
       auto const out_idx   = i * kLanesPerVector + lane;
@@ -110,7 +110,7 @@ __global__ void encode_native64_kernel(uint64_t const* __restrict values,
 
   auto const* vector_in = values + vector_start;
   auto* vector_out =
-    packed + static_cast<size_t>(vector_id) * fastlanes::words_per_vector_for_bw<BW>(kVectorSize);
+    packed + static_cast<size_t>(vector_id) * ::fastlanes::words_per_vector_for_bw<BW>(kVectorSize);
   encode_lane_native64<BW>(vector_in, vector_out, lane, base_bits);
 }
 
@@ -129,7 +129,7 @@ __global__ void decode_native64_kernel(uint64_t const* __restrict packed,
   if (vector_start >= padded_count) { return; }
 
   auto const* vector_in =
-    packed + static_cast<size_t>(vector_id) * fastlanes::words_per_vector_for_bw<BW>(kVectorSize);
+    packed + static_cast<size_t>(vector_id) * ::fastlanes::words_per_vector_for_bw<BW>(kVectorSize);
   auto* vector_out      = decoded + vector_start;
   decode_lane_native64<BW>(vector_in, vector_out, lane, base_bits);
 }
@@ -250,8 +250,8 @@ void encode_device_ptr_dispatch_wrapper(uint64_t const* values,
                                         uint32_t total_count,
                                         cudaStream_t stream)
 {
-  auto const padded_count = static_cast<uint32_t>(fastlanes::padded_count(total_count));
-  auto const num_vectors  = static_cast<uint32_t>(fastlanes::num_vectors(total_count));
+  auto const padded_count = static_cast<uint32_t>(::fastlanes::padded_count(total_count));
+  auto const num_vectors  = static_cast<uint32_t>(::fastlanes::num_vectors(total_count));
   if (num_vectors == 0) { return; }
 
   if constexpr (BW == 0) {
@@ -275,8 +275,8 @@ void decode_device_ptr_dispatch_wrapper(uint64_t const* packed,
                                         uint32_t total_count,
                                         cudaStream_t stream)
 {
-  auto const padded_count = static_cast<uint32_t>(fastlanes::padded_count(total_count));
-  auto const num_vectors  = static_cast<uint32_t>(fastlanes::num_vectors(total_count));
+  auto const padded_count = static_cast<uint32_t>(::fastlanes::padded_count(total_count));
+  auto const num_vectors  = static_cast<uint32_t>(::fastlanes::num_vectors(total_count));
   if (num_vectors == 0) { return; }
 
   auto const num_blocks = (num_vectors + kVectorsPerBlock - 1U) / kVectorsPerBlock;
@@ -304,4 +304,4 @@ inline constexpr std::array<decode_device_ptr_dispatch_fn, 65> kDecodeDevicePtrD
 #undef NATIVE64_FOR_EACH_BW
 
 
-}  // namespace native64_generated
+}  // namespace cudf::io::parquet::detail::fastlanes::native64

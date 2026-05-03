@@ -9,6 +9,8 @@
 
 namespace fastlanes_encode_stage {
 
+namespace parquet_fastlanes = cudf::io::parquet::detail::fastlanes;
+
 struct fastlanes_cpu_upload_buffers {
   explicit fastlanes_cpu_upload_buffers(size_t num_pages)
     : host_upload_ptrs(num_pages, nullptr), host_upload_sizes(num_pages, 0)
@@ -53,11 +55,11 @@ void validate_fastlanes_pre_delta_policy(encode_kernel_mask kernel_mask, HeaderT
   auto const is_valid = [&]() {
     switch (encoding) {
       case Encoding::FASTLANE_BITPACK_RAW:
-        return fastlanes::is_pre_delta_valid_for_raw32(hdr.pre_delta);
+        return ::fastlanes::is_pre_delta_valid_for_raw32(hdr.pre_delta);
       case Encoding::FASTLANE_BITPACK_SPLIT64:
-        return fastlanes::is_pre_delta_valid_for_split64(hdr.pre_delta);
+        return ::fastlanes::is_pre_delta_valid_for_split64(hdr.pre_delta);
       case Encoding::FASTLANES_DELTA_BINARY:
-        return fastlanes::is_pre_delta_valid_for_native64(hdr.pre_delta);
+        return ::fastlanes::is_pre_delta_valid_for_native64(hdr.pre_delta);
       default: return false;
     }
   }();
@@ -81,7 +83,7 @@ void ensure_fastlanes_page_fits_reserved_size(size_t page_idx,
 }
 
 uint32_t register_fastlanes_upload(size_t page_idx,
-                                   fastlanes_cudf::EncodedPageResult&& result,
+                                   parquet_fastlanes::EncodedPageResult&& result,
                                    fastlanes_cpu_upload_buffers& upload_buffers)
 {
   auto const encoded_blob_size = static_cast<uint32_t>(result.total_size());
@@ -92,11 +94,11 @@ uint32_t register_fastlanes_upload(size_t page_idx,
   return encoded_blob_size;
 }
 
-fastlanes_cudf::EncodedPageResult encode_fastlanes_int32_page(
+parquet_fastlanes::EncodedPageResult encode_fastlanes_int32_page(
   device_span<EncPage> pages,
   size_t page_idx,
   uint32_t num_values,
-  fastlanes_cudf::FastLanesInt32Encoder& encoder,
+  parquet_fastlanes::FastLanesInt32Encoder& encoder,
   rmm::cuda_stream_view stream)
 {
   rmm::device_uvector<uint32_t> gather_buffer(num_values, stream);
@@ -109,11 +111,11 @@ fastlanes_cudf::EncodedPageResult encode_fastlanes_int32_page(
                              stream);
 }
 
-fastlanes_cudf::EncodedPageResult encode_fastlanes_int64_page(
+parquet_fastlanes::EncodedPageResult encode_fastlanes_int64_page(
   device_span<EncPage> pages,
   size_t page_idx,
   uint32_t num_values,
-  fastlanes_cudf::FastLanesInt64Split32Encoder& encoder,
+  parquet_fastlanes::FastLanesInt64Split32Encoder& encoder,
   rmm::cuda_stream_view stream)
 {
   rmm::device_uvector<uint64_t> gather_buffer(num_values, stream);
@@ -126,11 +128,11 @@ fastlanes_cudf::EncodedPageResult encode_fastlanes_int64_page(
                              stream);
 }
 
-fastlanes_cudf::EncodedPageResult encode_fastlanes_int64_native_page(
+parquet_fastlanes::EncodedPageResult encode_fastlanes_int64_native_page(
   device_span<EncPage> pages,
   size_t page_idx,
   uint32_t num_values,
-  fastlanes_cudf::FastLanesInt64NativeEncoder& encoder,
+  parquet_fastlanes::FastLanesInt64NativeEncoder& encoder,
   rmm::cuda_stream_view stream)
 {
   rmm::device_uvector<uint64_t> gather_buffer(num_values, stream);
@@ -192,25 +194,25 @@ void run_fastlanes_cpu_encode(device_span<EncPage> pages,
   auto host_pages = copy_fastlanes_pages_to_host(pages, stream);
   fastlanes_cpu_upload_buffers upload_buffers(pages.size());
 
-  std::unique_ptr<fastlanes_cudf::FastLanesInt32Encoder> encoder_i32;
-  std::unique_ptr<fastlanes_cudf::FastLanesInt64Split32Encoder> encoder_i64_split32;
-  std::unique_ptr<fastlanes_cudf::FastLanesInt64NativeEncoder> encoder_i64_native;
+  std::unique_ptr<parquet_fastlanes::FastLanesInt32Encoder> encoder_i32;
+  std::unique_ptr<parquet_fastlanes::FastLanesInt64Split32Encoder> encoder_i64_split32;
+  std::unique_ptr<parquet_fastlanes::FastLanesInt64NativeEncoder> encoder_i64_native;
 
-  auto get_encoder_i32 = [&]() -> fastlanes_cudf::FastLanesInt32Encoder& {
-    if (!encoder_i32) { encoder_i32 = std::make_unique<fastlanes_cudf::FastLanesInt32Encoder>(); }
+  auto get_encoder_i32 = [&]() -> parquet_fastlanes::FastLanesInt32Encoder& {
+    if (!encoder_i32) { encoder_i32 = std::make_unique<parquet_fastlanes::FastLanesInt32Encoder>(); }
     return *encoder_i32;
   };
 
-  auto get_encoder_i64_split32 = [&]() -> fastlanes_cudf::FastLanesInt64Split32Encoder& {
+  auto get_encoder_i64_split32 = [&]() -> parquet_fastlanes::FastLanesInt64Split32Encoder& {
     if (!encoder_i64_split32) {
-      encoder_i64_split32 = std::make_unique<fastlanes_cudf::FastLanesInt64Split32Encoder>();
+      encoder_i64_split32 = std::make_unique<parquet_fastlanes::FastLanesInt64Split32Encoder>();
     }
     return *encoder_i64_split32;
   };
 
-  auto get_encoder_i64_native = [&]() -> fastlanes_cudf::FastLanesInt64NativeEncoder& {
+  auto get_encoder_i64_native = [&]() -> parquet_fastlanes::FastLanesInt64NativeEncoder& {
     if (!encoder_i64_native) {
-      encoder_i64_native = std::make_unique<fastlanes_cudf::FastLanesInt64NativeEncoder>();
+      encoder_i64_native = std::make_unique<parquet_fastlanes::FastLanesInt64NativeEncoder>();
     }
     return *encoder_i64_native;
   };
@@ -230,7 +232,7 @@ void run_fastlanes_cpu_encode(device_span<EncPage> pages,
       auto result = encode_fastlanes_int32_page(
         pages, page_idx, num_values, get_encoder_i32(), stream);
 
-      auto const hdr = fastlanes::PageHeader::deserialize(result.host_blob.data());
+      auto const hdr = ::fastlanes::PageHeader::deserialize(result.host_blob.data());
       validate_fastlanes_pre_delta_policy(host_pages[page_idx].kernel_mask, hdr);
 
       auto const page_encoding = fastlanes_encoding_for_mask(host_pages[page_idx].kernel_mask);
@@ -256,7 +258,7 @@ void run_fastlanes_cpu_encode(device_span<EncPage> pages,
           "FastLanes INT64 path only supports SPLIT64 and FASTLANES_DELTA_BINARY encodings");
       }();
 
-      auto const hdr = fastlanes::PageHeader::deserialize(result.host_blob.data());
+      auto const hdr = ::fastlanes::PageHeader::deserialize(result.host_blob.data());
       validate_fastlanes_pre_delta_policy(host_pages[page_idx].kernel_mask, hdr);
 
       auto const encoded_blob_size = static_cast<uint32_t>(result.total_size());

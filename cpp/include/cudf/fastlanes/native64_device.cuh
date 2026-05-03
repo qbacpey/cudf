@@ -14,10 +14,10 @@
 #include <stdexcept>
 #include <string>
 
-namespace native64_generated {
+namespace cudf::io::parquet::detail::fastlanes::native64 {
 
 [[nodiscard]] std::string cuda_error(cudaError_t status, char const* operation);
 
-}  // namespace native64_generated
+}  // namespace cudf::io::parquet::detail::fastlanes::native64
 
 #include <cudf/fastlanes/native64_cuda_kernels.inl>

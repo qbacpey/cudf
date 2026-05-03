@@ -26,6 +26,8 @@
 
 namespace {
 
+namespace fastlanes_native64 = cudf::io::parquet::detail::fastlanes::native64;
+
 class ParquetFastLanesNative64GeneratedTest : public cudf::test::BaseFixture {};
 
 constexpr uint32_t kVectorSize    = static_cast<uint32_t>(fastlanes::VECTOR_SIZE);
@@ -232,7 +234,7 @@ namespace native64_generated_test {
   }
 
   auto const min_base_bits =
-    ::native64_generated::derive_min_base_bits(d_values, total_count, stream.value());
+    fastlanes_native64::derive_min_base_bits(d_values, total_count, stream.value());
 
   auto const sync_status = cudaStreamSynchronize(stream.value());
   if (sync_status != cudaSuccess) {
@@ -308,7 +310,7 @@ namespace native64_generated_test {
     }
   }
 
-  ::native64_generated::launch_native64_encode(
+  fastlanes_native64::launch_native64_encode(
     bw, d_values, d_packed, base_bits, total_count, stream.value());
 
   auto const sync_status = cudaStreamSynchronize(stream.value());
@@ -411,7 +413,7 @@ namespace native64_generated_test {
     }
   }
 
-  ::native64_generated::launch_native64_decode(
+  fastlanes_native64::launch_native64_decode(
     bw, d_packed, d_decoded, base_bits, total_count, stream.value());
 
   auto const sync_status = cudaStreamSynchronize(stream.value());

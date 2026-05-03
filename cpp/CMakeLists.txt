@@ -413,7 +413,10 @@ endif()
 # * library targets -------------------------------------------------------------------------------
 add_library(
   cudf
-  src/fastlanes/fastlanes.cu
+  src/fastlanes/encode_common.cu
+  src/fastlanes/encode_raw32.cu
+  src/fastlanes/encode_split64.cu
+  src/fastlanes/encode_native64.cu
   src/fastlanes/native64_host.cu
   src/fastlanes/ffor.cpp
   src/fastlanes/ffor_wrappers.cpp

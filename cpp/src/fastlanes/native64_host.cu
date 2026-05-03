@@ -19,7 +19,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace native64_generated {
+namespace cudf::io::parquet::detail::fastlanes::native64 {
 
 [[nodiscard]] std::string cuda_error(cudaError_t status, char const* operation)
 {
@@ -68,4 +68,4 @@ void launch_native64_decode(uint8_t bw,
   kDecodeDevicePtrDispatch[bw](packed, decoded, base_bits, total_count, stream);
 }
 
-}  // namespace native64_generated
+}  // namespace cudf::io::parquet::detail::fastlanes::native64

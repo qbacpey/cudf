@@ -103,6 +103,7 @@ Phase 1 Milestone Gate
 - Depends on: Phase 1 milestone.
 - Editable scope:
   - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/fastlanes.cu (delete)
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_common.hpp (new internal helper header)
   - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_common.cu (new)
   - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_raw32.cu (new)
   - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_split64.cu (new)
@@ -111,7 +112,7 @@ Phase 1 Milestone Gate
   - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/CMakeLists.txt
 - Forbidden scope: page_enc batching refactor.
 - Concrete edits:
-  - Move shared helpers to encode_common.cu.
+  - Move shared inline templates and helper declarations to encode_common.hpp, with shared non-template helpers in encode_common.cu.
   - Move algorithm bodies to raw32/split64/native64 source files.
   - Keep behavior byte-identical and preserve existing class APIs.
 - Validation: same per-run test set + rg -n for deleted fastlanes.cu references.
@@ -241,6 +242,7 @@ Phase 3 Milestone Gate
 - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_device.cuh — device/runtime dispatch boundary and .inl inclusion.
 - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_cuda_kernels.inl — generated lane kernels/dispatch tables.
 - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/native64_host.cu — host launch wrapper implementations.
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_common.hpp — internal helper declarations/templates shared by split encoder units.
 - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_common.cu — shared encoding helpers.
 - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_raw32.cu — RAW32 encoder implementation.
 - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/fastlanes/encode_split64.cu — SPLIT64 encoder implementation.

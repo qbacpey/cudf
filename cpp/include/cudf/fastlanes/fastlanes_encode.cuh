@@ -9,7 +9,7 @@
 #include <tuple>
 #include <vector>
 
-namespace cudf::io::parquet::detail::fastlanes_cudf {
+namespace cudf::io::parquet::detail::fastlanes {
 
 // =============================================================================
 // FastLanes Encoder Result
@@ -22,7 +22,7 @@ struct EncodedPageResult {
   std::vector<uint8_t> host_blob;  // Complete blob: [Header][Encoded Body]
   rmm::device_buffer device_blob;  // Uploaded to GPU
   uint8_t bitwidth;                // Bits per value used
-  fastlanes::TypeCastMode cast_mode;  // How type was handled
+  ::fastlanes::TypeCastMode cast_mode;  // How type was handled
   uint32_t original_count;         // Original element count
   uint32_t padded_count;           // Padded element count
   size_t body_size;                // Encoded body size in bytes
@@ -143,4 +143,4 @@ class FastLanesInt64NativeEncoder {
 
 };
 
-}  // namespace cudf::io::parquet::detail::fastlanes_cudf
+}  // namespace cudf::io::parquet::detail::fastlanes

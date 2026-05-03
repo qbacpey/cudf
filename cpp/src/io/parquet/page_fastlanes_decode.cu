@@ -37,6 +37,8 @@ namespace cudf::io::parquet::detail {
 namespace {
 
 namespace cg = cooperative_groups;
+namespace fl = ::fastlanes;
+namespace fastlanes_native64 = cudf::io::parquet::detail::fastlanes::native64;
 
 constexpr int decode_fastlanes_block_size = 32;  // exactly one warp
 constexpr int fastlanes_vector_size       = 1024;
@@ -54,7 +56,7 @@ __device__ inline bool setup_and_validate_fastlanes_page(page_state_s* s,
                                                          decode_kernel_mask expected_kernel_mask,
                                                          int lane,
                                                          kernel_error::pointer error_code,
-                                                         fastlanes::PageHeader* fastlanes_header,
+                                                         fl::PageHeader* fastlanes_header,
                                                          uint32_t* total_value_count)
 {
   if (!setup_local_page_info(s,
@@ -107,7 +109,7 @@ __device__ inline bool setup_and_validate_fastlanes_page(page_state_s* s,
 
   if (s->page.encoding != expected_encoding) { return false; }
 
-  auto const header = fastlanes::PageHeader::deserialize(s->data_start);
+  auto const header = fl::PageHeader::deserialize(s->data_start);
 
   if (!fastlanes_is_valid_header_for_encoding(header, expected_encoding)) {
     return fastlanes_set_decode_error(lane, error_code, decode_error::INVALID_DATA_TYPE);
@@ -143,7 +145,7 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
   int const lane        = static_cast<int>(block.thread_rank());
   [[maybe_unused]] null_count_back_copier _{s, lane};
 
-  fastlanes::PageHeader fastlanes_header{};
+  fl::PageHeader fastlanes_header{};
   uint32_t total_value_count = 0;
   if (!setup_and_validate_fastlanes_page<level_t>(s,
                                                   pages,
@@ -162,7 +164,7 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
     return;
   }
 
-  auto const* payload_bytes = fastlanes::PageHeader::payload_ptr(s->data_start);
+  auto const* payload_bytes = fl::PageHeader::payload_ptr(s->data_start);
   auto const packed_words_per_vector =
     static_cast<uint32_t>(fastlanes_header.component_bitwidth_low) * 32;
   auto const min_value_bits = fastlanes_header.min_value_low_bits;
@@ -207,7 +209,7 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
 
       if (dst_pos >= 0 && dst_pos < s->num_rows) {
         if (s->dtype_len == 8) {
-          output_base_64[dst_pos] = static_cast<int64_t>(fastlanes::u32_bits_to_int32(value_bits));
+          output_base_64[dst_pos] = static_cast<int64_t>(fl::u32_bits_to_int32(value_bits));
         } else if (s->dtype_len == 4) {
           output_base_32[dst_pos] = value_bits;
         } else if (s->dtype_len == 2) {
@@ -251,7 +253,7 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
   int const lane        = static_cast<int>(block.thread_rank());
   [[maybe_unused]] null_count_back_copier _{s, lane};
 
-  fastlanes::PageHeader fastlanes_header{};
+  fl::PageHeader fastlanes_header{};
   uint32_t total_value_count = 0;
   if (!setup_and_validate_fastlanes_page<level_t>(s,
                                                   pages,
@@ -270,7 +272,7 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
     return;
   }
 
-  auto const* payload_bytes = fastlanes::PageHeader::payload_ptr(s->data_start);
+  auto const* payload_bytes = fl::PageHeader::payload_ptr(s->data_start);
   auto const packed_words_per_vector_low =
     static_cast<uint32_t>(fastlanes_header.component_bitwidth_low) * 32;
   auto const packed_words_per_vector_high =
@@ -324,7 +326,7 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
       auto const high_bits = min_value_high_64 + decoded_vec_high[i];
       auto const value_bits =
         (static_cast<uint64_t>(high_bits) << 32) | static_cast<uint64_t>(low_bits);
-      auto const signed_val = fastlanes::u64_bits_to_int64(value_bits);
+      auto const signed_val = fl::u64_bits_to_int64(value_bits);
 
       if (dst_pos >= 0 && dst_pos < s->num_rows) { output_base_64[dst_pos] = signed_val; }
     }
@@ -350,13 +352,13 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
                 cudf::device_span<bool const> page_mask,
                 kernel_error::pointer error_code)
 {
-  constexpr uint32_t native64_lanes_per_vector = native64_generated::kLanesPerVector;
+  constexpr uint32_t native64_lanes_per_vector = fastlanes_native64::kLanesPerVector;
   constexpr uint32_t native64_vectors_per_block =
     decode_fastlanes_block_size / native64_lanes_per_vector;
   constexpr uint32_t native64_values_per_block = native64_vectors_per_block * fastlanes_vector_size;
   static_assert((decode_fastlanes_block_size % native64_lanes_per_vector) == 0,
                 "decode block size must be a multiple of native64 lanes per vector");
-  static_assert(native64_vectors_per_block == native64_generated::kVectorsPerBlock,
+  static_assert(native64_vectors_per_block == fastlanes_native64::kVectorsPerBlock,
                 "native64 decode kernel launch geometry mismatch");
 
   __shared__ uint64_t decoded_vec[fastlanes_vector_size * native64_vectors_per_block];
@@ -369,7 +371,7 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
   int const lane        = static_cast<int>(block.thread_rank());
   [[maybe_unused]] null_count_back_copier _{s, lane};
 
-  fastlanes::PageHeader fastlanes_header{};
+  fl::PageHeader fastlanes_header{};
   uint32_t total_value_count = 0;
   if (!setup_and_validate_fastlanes_page<level_t>(s,
                                                   pages,
@@ -388,9 +390,9 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
     return;
   }
 
-  auto const* payload_bytes          = fastlanes::PageHeader::payload_ptr(s->data_start);
+  auto const* payload_bytes          = fl::PageHeader::payload_ptr(s->data_start);
   auto const packed_words_per_vector = static_cast<uint32_t>(
-    fastlanes::encoded_size_bytes(fastlanes_vector_size, fastlanes_header.component_bitwidth_low) /
+    fl::encoded_size_bytes(fastlanes_vector_size, fastlanes_header.component_bitwidth_low) /
     sizeof(uint64_t));
   if (packed_words_per_vector > fastlanes_vector_size) {
     fastlanes_set_decode_error(lane, error_code, decode_error::INVALID_DATA_TYPE);
@@ -435,7 +437,7 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
       auto const* packed_words =
         packed_vec_aligned + static_cast<size_t>(subvec) * fastlanes_vector_size;
       auto* decoded_words = decoded_vec + static_cast<size_t>(subvec) * fastlanes_vector_size;
-      native64_generated::decode_lane_by_bw_device_runtime(
+      fastlanes_native64::decode_lane_by_bw_device_runtime(
         fastlanes_header.component_bitwidth_low, packed_words, decoded_words, sublane, base_bits);
     }
     block.sync();
@@ -445,7 +447,7 @@ CUDF_KERNEL void __launch_bounds__(decode_fastlanes_block_size)
       auto const intra_idx  = i % fastlanes_vector_size;
       auto const decoded_i  = static_cast<size_t>(vec_idx) * fastlanes_vector_size + intra_idx;
       auto const dst_pos    = static_cast<int32_t>(value_base_idx + i) - s->first_row;
-      auto const signed_val = fastlanes::u64_bits_to_int64(decoded_vec[decoded_i]);
+      auto const signed_val = fl::u64_bits_to_int64(decoded_vec[decoded_i]);
 
       if (dst_pos >= 0 && dst_pos < s->num_rows) { output_base_64[dst_pos] = signed_val; }
     }
