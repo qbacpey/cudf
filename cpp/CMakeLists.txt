@@ -413,6 +413,10 @@ endif()
 # * library targets -------------------------------------------------------------------------------
 add_library(
   cudf
+  src/fastlanes/fastlanes.cu
+  src/fastlanes/pack.cpp
+  src/fastlanes/transpose.cpp
+  src/fastlanes/unrsum.cpp
   src/aggregation/aggregation.cpp
   src/aggregation/aggregation.cu
   src/aggregation/result_cache.cpp
@@ -637,6 +641,7 @@ add_library(
   src/io/parquet/page_enc.cu
   src/io/parquet/page_hdr.cu
   src/io/parquet/page_delta_decode.cu
+  src/io/parquet/page_fastlanes_decode.cu
   src/io/parquet/page_string_decode.cu
   src/io/parquet/predicate_pushdown.cpp
   src/io/parquet/reader.cpp
@@ -1048,6 +1053,7 @@ target_include_directories(
           "$<BUILD_INTERFACE:${nanoarrow_SOURCE_DIR}/src>"
           "$<BUILD_INTERFACE:${FlatBuffers_SOURCE_DIR}/include>"
           "$<BUILD_INTERFACE:${ZSTD_INCLUDE_DIR}>"
+          "$<BUILD_INTERFACE:${CUDF_SOURCE_DIR}/src/io/parquet/fastlanes>"
   INTERFACE "$<INSTALL_INTERFACE:include>"
 )
 

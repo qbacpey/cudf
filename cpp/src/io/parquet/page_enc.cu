@@ -17,6 +17,9 @@
 #include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/stream_pool.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
+#include <cudf/fastlanes/common.cuh>
+#include <cudf/fastlanes/debug.hpp>
+#include <cudf/fastlanes/fastlanes_encode.cuh>
 
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/exec_policy.hpp>
@@ -497,6 +500,24 @@ CUDF_KERNEL void __launch_bounds__(128)
   }
 }
 
+CUDF_HOST_DEVICE constexpr bool is_fastlanes_bitpack_supported_int32_logical(
+  cudf::type_id logical_type)
+{
+  switch (logical_type) {
+    case cudf::type_id::INT8:
+    case cudf::type_id::UINT8:
+    case cudf::type_id::INT16:
+    case cudf::type_id::UINT16:
+    case cudf::type_id::INT32:
+    case cudf::type_id::UINT32:
+    case cudf::type_id::TIMESTAMP_DAYS:
+    case cudf::type_id::DECIMAL32:
+    case cudf::type_id::DURATION_SECONDS:
+    case cudf::type_id::DURATION_MILLISECONDS: return true;
+    default: return false;
+  }
+}
+
 // given a column chunk, determine which data encoding to use
 __device__ encode_kernel_mask data_encoding_for_col(EncColumnChunk const* chunk,
                                                     parquet_column_device_view const* col_desc,
@@ -517,6 +538,23 @@ __device__ encode_kernel_mask data_encoding_for_col(EncColumnChunk const* chunk,
       case column_encoding::DELTA_LENGTH_BYTE_ARRAY: return encode_kernel_mask::DELTA_LENGTH_BA;
       case column_encoding::DELTA_BYTE_ARRAY: return encode_kernel_mask::DELTA_BYTE_ARRAY;
       case column_encoding::BYTE_STREAM_SPLIT: return encode_kernel_mask::BYTE_STREAM_SPLIT;
+      case column_encoding::FASTLANES_BITPACK: {
+        // Runtime gate mirrors schema validation: flat INT32 physical columns use FastLanes.
+        if (col_desc->physical_type == Type::INT32 && col_desc->max_rep_level == 0) {
+          return encode_kernel_mask::FASTLANES_BITPACK;
+        }
+        // Fallback to PLAIN if constraints not met
+        return encode_kernel_mask::PLAIN;
+      }
+      case column_encoding::FASTLANES_DELTA_BINARY: {
+        // Enforce INT32 or INT64 and no lists
+        if ((col_desc->physical_type == Type::INT32 || col_desc->physical_type == Type::INT64) &&
+            col_desc->max_rep_level == 0) {  // No lists
+          return encode_kernel_mask::FASTLANES_DELTA_BINARY;
+        }
+        // Fallback to DELTA_BINARY_PACKED if constraints not met
+        return encode_kernel_mask::DELTA_BINARY;
+      }
     }
   }
 
@@ -816,8 +854,30 @@ CUDF_KERNEL void __launch_bounds__(128)
           auto const max_data_size =
             page_size + rle_pad +
             (write_v2_headers ? page_g.max_lvl_size : def_level_size + rep_level_size);
+          // Why this extra reservation exists:
+          // - Generic page sizing above is based on fragment/page row bytes and can be very small
+          //   for tiny tail pages.
+          // - FastLanes encoder still pads each page to whole 1024-value vectors, so encoded bytes
+          //   can be much larger than the raw bytes for that tiny tail page.
+          // - Without this bound, page_g.max_data_size can under-reserve, and the later copy kernel
+          //   would write past the allocated page buffer.
+          //
+          // We intentionally use a conservative bitwidth bound (31 for current signed INT32 path)
+          // to make reservation safe. This is not a compression optimization; it is a safety bound.
+          // TODO: tighten this reservation once we have page-level exact pre-size metadata.
+          constexpr uint8_t max_fastlanes_bitwidth = 31;
+          auto const fastlanes_num_vectors =
+            (static_cast<size_t>(page_g.num_leaf_values) + size_t{1023}) / size_t{1024};
+          auto const fastlanes_body_size =
+            fastlanes_num_vectors * size_t{1024} * max_fastlanes_bitwidth / size_t{8};
+          auto const fastlanes_reserved_size =
+            (column_data_encoding == encode_kernel_mask::FASTLANES_BITPACK)
+              ? fastlanes::PageHeader::header_size() +
+                  fastlanes_body_size
+              : size_t{0};
+          auto const reserved_data_size = max(max_data_size, fastlanes_reserved_size);
           // page size must fit in 32-bit signed integer
-          if (max_data_size > cuda::std::numeric_limits<int32_t>::max()) {
+          if (reserved_data_size > cuda::std::numeric_limits<int32_t>::max()) {
             CUDF_UNREACHABLE("page size exceeds maximum for i32");
           }
           // if byte_array then save the variable bytes size
@@ -828,7 +888,7 @@ CUDF_KERNEL void __launch_bounds__(128)
           }
 
           page_g.kernel_mask      = column_data_encoding;
-          page_g.max_data_size    = static_cast<uint32_t>(max_data_size);
+          page_g.max_data_size    = static_cast<uint32_t>(reserved_data_size);
           pagestats_g.start_chunk = ck_g.first_fragment + page_start;
           pagestats_g.num_chunks  = page_g.num_fragments;
           page_offset +=
@@ -2618,6 +2678,195 @@ CUDF_KERNEL void __launch_bounds__(decide_compression_block_size)
   }
 }
 
+struct fastlanes_page_type_info {
+  Type physical_type{};
+  cudf::type_id logical_type{};
+  uint32_t dtype_len_out{};
+  uint32_t dtype_len_in{};
+};
+
+// Single-page gather kernel that can also return the same physical/logical type view used by the
+// main encode path. Keeping this as a small POD makes it easy to extend later if more FastLanes
+// types are added.
+template <typename OutputT, int block_size>
+CUDF_KERNEL void __launch_bounds__(block_size)
+  gpuGatherSinglePageTyped(device_span<EncPage> pages,
+                           size_t target_page_idx,
+                           OutputT* output_buffer,
+                           fastlanes_page_type_info* out_type_info)
+{
+  __shared__ __align__(8) page_enc_state_s<0> state_g;
+  auto* const s = &state_g;
+  uint32_t t    = threadIdx.x;
+
+  if (t == 0) {
+    state_g           = page_enc_state_s<0>{};
+    s->page           = pages[target_page_idx];
+    s->ck             = *s->page.chunk;
+    s->col            = *s->ck.col_desc;
+    s->page_start_val = row_to_value_idx(s->page.start_row, s->col);
+  }
+  __syncthreads();
+
+  // Derive input type details mirroring logic in gpuEncodePages
+  auto const physical_type = s->col.physical_type;
+  auto const type_id       = s->col.leaf_column->type().id();
+  auto const dtype_len_out = physical_type_len(physical_type, type_id, s->col.type_length);
+  auto const dtype_len_in  = [&]() -> uint32_t {
+    if (physical_type == Type::INT32) { return int32_logical_len(type_id); }
+    if (physical_type == Type::INT96) { return sizeof(int64_t); }
+    return dtype_len_out;
+  }();
+
+  if (t == 0 && out_type_info != nullptr) {
+    *out_type_info = fastlanes_page_type_info{physical_type, type_id, dtype_len_out, dtype_len_in};
+  }
+  __syncthreads();
+
+  if (output_buffer == nullptr) { return; }
+
+  // Gather with type dispatch based on input size, cast to OutputT
+  for (uint32_t i = 0; i < s->page.num_leaf_values; i += block_size) {
+    uint32_t const idx = i + t;
+    if (idx < s->page.num_leaf_values) {
+      uint32_t const val_idx = s->page_start_val + idx;
+
+      OutputT out_val = 0;
+
+      if constexpr (sizeof(OutputT) == 4) {
+        // Logic for INT32 Physical Type (matches gpuEncodePages)
+        // Handles int8/16/32 -> int32 promotion and timestamp scaling
+        auto const scale = s->col.ts_scale == 0 ? 1 : s->col.ts_scale;
+        auto const col   = s->col.leaf_column;
+
+        int64_t v;
+        switch (dtype_len_in) {
+          case 8: v = static_cast<int64_t>(col->element<int64_t>(val_idx)) * scale; break;
+          case 4:
+            v = (type_id == cudf::type_id::UINT32)
+                  ? static_cast<int64_t>(col->element<uint32_t>(val_idx)) * scale
+                  : static_cast<int64_t>(col->element<int32_t>(val_idx)) * scale;
+            break;
+          case 2:
+            v = (type_id == cudf::type_id::UINT16)
+                  ? static_cast<int64_t>(col->element<uint16_t>(val_idx)) * scale
+                  : static_cast<int64_t>(col->element<int16_t>(val_idx)) * scale;
+            break;
+          default:
+            v = (type_id == cudf::type_id::UINT8)
+                  ? static_cast<int64_t>(col->element<uint8_t>(val_idx)) * scale
+                  : static_cast<int64_t>(col->element<int8_t>(val_idx)) * scale;
+            break;
+        }
+        out_val = static_cast<OutputT>(v);
+
+      } else {
+        // Logic for INT64 Physical Type (matches gpuEncodePages)
+        // Handles int64 pass-through and timestamp scaling
+        int64_t v = s->col.leaf_column->element<int64_t>(val_idx);
+        int32_t const ts_scale = s->col.ts_scale;
+        
+        if (ts_scale != 0) {
+            if (ts_scale < 0) {
+              v /= -ts_scale;
+            } else {
+              v *= ts_scale;
+            }
+        }
+        out_val = static_cast<OutputT>(v);
+      }
+
+      output_buffer[idx] = out_val;
+    }
+  }
+}
+// SIMT Copy Kernel: Copies CPU-encoded data to final Parquet buffer
+// Template on physical type width
+template <int block_size>
+CUDF_KERNEL void __launch_bounds__(block_size, 8)
+  gpuEncodeCpuPages(device_span<EncPage> pages,
+                    device_span<device_span<uint8_t const>> comp_in,
+                    device_span<device_span<uint8_t>> comp_out,
+                    device_span<codec_exec_result> comp_results,
+                    uint8_t** pre_encoded_ptrs,
+                    uint32_t* pre_encoded_sizes,
+                    bool write_v2_headers)
+{
+  __shared__ __align__(8) page_enc_state_s<0> state_g;
+
+  auto* const s = &state_g;
+  uint32_t t    = threadIdx.x;
+
+  if (t == 0) {
+    state_g        = page_enc_state_s<0>{};
+    s->page        = pages[blockIdx.x];
+    s->ck          = *s->page.chunk;
+    s->col         = *s->ck.col_desc;
+    s->rle_len_pos = nullptr;
+
+    set_page_data_start(s);
+  }
+  __syncthreads();
+
+  if (BitAnd(s->page.kernel_mask, encode_kernel_mask::FASTLANES_BITPACK) == 0) { return; }
+
+  if (t == 0) {
+    uint8_t* dst       = s->cur;
+    s->rle_run         = 0;
+    s->rle_pos         = 0;
+    s->rle_numvals     = 0;
+    s->rle_out         = dst;
+    s->page.encoding   = Encoding::FASTLANES_BITPACK;
+    s->page_start_val  = row_to_value_idx(s->page.start_row, s->col);
+    s->chunk_start_val = row_to_value_idx(s->ck.start_row, s->col);
+  }
+  __syncthreads();
+
+  uint8_t* input_ptr = pre_encoded_ptrs[blockIdx.x];
+  uint32_t data_len  = pre_encoded_sizes[blockIdx.x];
+
+  if (fastlanes::debug::is_workload_enabled() && t == 0 && blockIdx.x < 2) {
+    printf("[FL COPY PRE ] page=%d start_row=%u num_rows=%u num_leaf=%u first_byte=%u data_len=%u max_data=%u\n",
+           static_cast<int>(blockIdx.x),
+           s->page.start_row,
+           s->page.num_rows,
+           s->page.num_leaf_values,
+           input_ptr != nullptr ? static_cast<unsigned>(input_ptr[0]) : 0,
+           data_len,
+           s->page.max_data_size);
+  }
+
+  // Safe checker for the related device pointers
+  // Device code cannot use CUDF_EXPECTS (which throws exceptions).
+  // Use CUDF_UNREACHABLE to trap/panic on GPU.
+  if (input_ptr == nullptr || data_len == 0) {
+    CUDF_UNREACHABLE("Invalid device pointers for pre-encoded page data.");
+  }
+
+  // SIMT parallel copy: Temp GPU Buffer → Final Parquet Buffer
+  // Safety contract: host-side reservation + guard ensures data_len <= page.max_data_size.
+  // This kernel assumes that contract and performs the bulk copy without per-thread bounds checks.
+  for (uint32_t i = t; i < data_len; i += block_size) {
+    s->cur[i] = input_ptr[i];
+  }
+  __syncthreads();
+
+  if (fastlanes::debug::is_workload_enabled() && t == 0 && blockIdx.x < 2) {
+    auto const copied_word0 = data_len >= sizeof(uint32_t)
+                                ? *reinterpret_cast<uint32_t const*>(s->cur)
+                                : 0u;
+    printf("[FL COPY POST] page=%d copied_word0=0x%08x end_word0=0x%08x\n",
+           static_cast<int>(blockIdx.x),
+           copied_word0,
+           input_ptr != nullptr && data_len >= sizeof(uint32_t)
+             ? *reinterpret_cast<uint32_t const*>(input_ptr)
+             : 0u);
+  }
+
+  finish_page_encode<block_size>(
+    s, s->cur + data_len, pages, comp_in, comp_out, comp_results, write_v2_headers);
+}
+
 /**
  * Minimal thrift compact protocol support
  */
@@ -3547,7 +3796,150 @@ void EncodePages(device_span<EncPage> pages,
     gpuEncodeDictPages<encode_block_size><<<num_pages, encode_block_size, 0, strm.value()>>>(
       pages, comp_in, comp_out, comp_results, write_v2_headers);
   }
+  // ========================================
+  // CPU FastLanes BitPacking Encoding Block
+  // ========================================
+  if (BitAnd(kernel_mask, encode_kernel_mask::FASTLANES_BITPACK) != 0) {
+    auto const strm = streams[s_idx++];
 
+    // 1. Copy page metadata to host
+    std::vector<EncPage> h_pages(pages.size());
+    cudaMemcpyAsync(
+      h_pages.data(), pages.data(), pages.size_bytes(), cudaMemcpyDeviceToHost, strm.value());
+    cudaStreamSynchronize(strm.value());
+
+    // 2. Prepare result storage
+    std::vector<rmm::device_buffer> encoded_buffers;
+    std::vector<uint8_t*> h_upload_ptrs(num_pages, nullptr);
+    std::vector<uint32_t> h_upload_sizes(num_pages, 0);
+    encoded_buffers.reserve(num_pages);
+
+    // Trade-off: keep host-side type handling simple instead of plumbing more metadata
+    // through the write path. We still query both parquet physical type and logical leaf
+    // type here so the dispatch mirrors the main encode flow and is easy to extend later.
+    std::unique_ptr<fastlanes_cudf::FastLanesInt32Encoder> encoder_i32;
+
+    auto get_encoder_i32 = [&]() -> fastlanes_cudf::FastLanesInt32Encoder& {
+      if (!encoder_i32) {
+        encoder_i32 = std::make_unique<fastlanes_cudf::FastLanesInt32Encoder>(false);
+      }
+      return *encoder_i32;
+    };
+
+    // 3. Process each page individually with simple type dispatch.
+    for (size_t page_idx = 0; page_idx < num_pages; ++page_idx) {
+      if (BitAnd(h_pages[page_idx].kernel_mask, encode_kernel_mask::FASTLANES_BITPACK) == 0) {
+        continue;
+      }
+
+      uint32_t const num_values = h_pages[page_idx].num_leaf_values;
+      if (num_values == 0) { continue; }
+
+      if (fastlanes::debug::is_header_enabled()) {
+        std::cout << "[FL HOST META ] page=" << page_idx << " start_row=" << h_pages[page_idx].start_row
+                  << " num_rows=" << h_pages[page_idx].num_rows
+                  << " num_leaf=" << h_pages[page_idx].num_leaf_values
+                  << " max_data_size=" << h_pages[page_idx].max_data_size << "\n";
+      }
+
+      rmm::device_scalar<fastlanes_page_type_info> d_type_info(
+        fastlanes_page_type_info{}, strm);
+      gpuGatherSinglePageTyped<int32_t, encode_block_size>
+        <<<1, encode_block_size, 0, strm.value()>>>(pages, page_idx, nullptr, d_type_info.data());
+      auto const type_info = d_type_info.value(strm);
+
+      if (type_info.physical_type == Type::INT32) {
+        // Keep one encode path by gathering raw INT32-physical bits and reinterpreting as int32.
+        rmm::device_uvector<uint32_t> d_gather_buffer(num_values, strm);
+        gpuGatherSinglePageTyped<uint32_t, encode_block_size>
+          <<<1, encode_block_size, 0, strm.value()>>>(pages, page_idx, d_gather_buffer.data(), nullptr);
+        cudaStreamSynchronize(strm.value());
+
+        if (fastlanes::debug::is_vector_boundary_enabled()) {
+          auto print_u32_at = [&](uint32_t idx, char const* tag) {
+            if (idx >= num_values) return;
+            uint32_t v{};
+            cudaMemcpyAsync(&v,
+                            d_gather_buffer.data() + idx,
+                            sizeof(uint32_t),
+                            cudaMemcpyDeviceToHost,
+                            strm.value());
+            cudaStreamSynchronize(strm.value());
+            std::cout << "[FL GATHER   ] page=" << page_idx << " " << tag << " idx=" << idx
+                      << " val=0x" << std::hex << v << std::dec << "\n";
+          };
+          print_u32_at(0, "head");
+          print_u32_at(1, "head");
+          if (num_values > 1023) { print_u32_at(1023, "boundary"); }
+          if (num_values > 1024) { print_u32_at(1024, "boundary"); }
+        }
+
+        auto result = get_encoder_i32().encode_page(
+          reinterpret_cast<int32_t const*>(d_gather_buffer.data()), num_values, strm);
+
+        if (fastlanes::debug::is_workload_enabled()) {
+          auto const hdr = fastlanes::PageHeader::deserialize(result.host_blob.data());
+          auto const* payload_u32 = reinterpret_cast<uint32_t const*>(
+            fastlanes::PageHeader::payload_ptr(result.host_blob.data()));
+          std::cout << "[FL ENCODED  ] page=" << page_idx << " bw=" << static_cast<int>(hdr.bitwidth)
+                    << " orig=" << hdr.original_count << " pad=" << hdr.padded_count
+                    << " body=" << hdr.body_size << " min=0x" << std::hex << hdr.min_value
+                    << std::dec << " blob=" << result.total_size() << "\n";
+          if (hdr.body_size >= sizeof(uint32_t)) {
+            std::cout << "[FL PAYLOAD  ] page=" << page_idx << " payload[0]=0x" << std::hex
+                      << payload_u32[0] << std::dec << "\n";
+          }
+        }
+
+        auto const encoded_blob_size = static_cast<uint32_t>(result.total_size());
+        if (encoded_blob_size > h_pages[page_idx].max_data_size) {
+          throw std::runtime_error("FastLanes encoded page exceeds reserved page size: page=" +
+                                   std::to_string(page_idx) +
+                                   " encoded=" + std::to_string(encoded_blob_size) +
+                                   " reserved=" +
+                                   std::to_string(h_pages[page_idx].max_data_size) +
+                                   " num_leaf=" +
+                                   std::to_string(h_pages[page_idx].num_leaf_values));
+        }
+
+        encoded_buffers.push_back(std::move(result.device_blob));
+        h_upload_ptrs[page_idx]  = static_cast<uint8_t*>(encoded_buffers.back().data());
+        h_upload_sizes[page_idx] = encoded_blob_size;
+
+        if (fastlanes::debug::is_workload_enabled()) {
+          std::cout << "[FL UPLOAD   ] page=" << page_idx
+                    << " ptr=" << static_cast<void*>(h_upload_ptrs[page_idx])
+                    << " size=" << h_upload_sizes[page_idx] << "\n";
+        }
+      } else {
+        throw std::invalid_argument(
+          "FastLanes BitPacking supports only selected INT32 logical types in flat pages");
+      }
+    }
+
+    // 5. Copy upload pointers to device
+    rmm::device_uvector<uint8_t*> d_upload_ptrs(num_pages, strm);
+    rmm::device_uvector<uint32_t> d_upload_sizes(num_pages, strm);
+    cudaMemcpyAsync(d_upload_ptrs.data(),
+                    h_upload_ptrs.data(),
+                    num_pages * sizeof(uint8_t*),
+                    cudaMemcpyHostToDevice,
+                    strm.value());
+    cudaMemcpyAsync(d_upload_sizes.data(),
+                    h_upload_sizes.data(),
+                    num_pages * sizeof(uint32_t),
+                    cudaMemcpyHostToDevice,
+                    strm.value());
+
+    // 6. Launch Page Levels Encoder
+    gpuEncodePageLevels<encode_block_size><<<num_pages, encode_block_size, 0, strm.value()>>>(
+      pages, write_v2_headers, encode_kernel_mask::FASTLANES_BITPACK);
+
+    // 7. Launch Copy Kernel
+    gpuEncodeCpuPages<encode_block_size><<<num_pages, encode_block_size, 0, strm.value()>>>(
+      pages, comp_in, comp_out, comp_results, 
+      d_upload_ptrs.data(), d_upload_sizes.data(), write_v2_headers);
+  }
   cudf::detail::join_streams(streams, stream);
 }
 

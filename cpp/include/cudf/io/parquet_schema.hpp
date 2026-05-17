@@ -93,6 +93,8 @@ enum class Encoding : uint8_t {
   RLE_DICTIONARY          = 8,
   BYTE_STREAM_SPLIT       = 9,
   NUM_ENCODINGS           = 10,
+  FASTLANES_BITPACK       = 11,
+  FASTLANES_DELTA_BINARY  = 12,
 };
 
 /**

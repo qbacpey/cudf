@@ -23,6 +23,22 @@ class timer {
   timer() { reset(); }
   void reset() { start_time = std::chrono::high_resolution_clock::now(); }
   auto elapsed() const { return (std::chrono::high_resolution_clock::now() - start_time); }
+
+  // Return elapsed time in milliseconds as double
+  [[nodiscard]] double elapsed_millis() const
+  {
+    return std::chrono::duration<double, std::milli>(elapsed()).count();
+  }
+
+  // Return elapsed time in microseconds as double
+  [[nodiscard]] double elapsed_micros() const
+  {
+    return std::chrono::duration<double, std::micro>(elapsed()).count();
+  }
+
+  // Return elapsed time in seconds as double
+  [[nodiscard]] double elapsed_seconds() const { return std::chrono::duration<double>(elapsed()).count(); }
+
   void print_elapsed_micros() const
   {
     std::cout << "Elapsed Time: " << std::chrono::duration_cast<micros>(elapsed()).count()

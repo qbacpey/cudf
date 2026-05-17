@@ -299,6 +299,28 @@ void reader_impl::decode_page_data(read_mode mode, size_t skip_rows, size_t num_
                         streams[s_idx++]);
   }
 
+  // launch FastLanes bitpack decoder
+  if (BitAnd(kernel_mask, decode_kernel_mask::FASTLANES_BINARY) != 0) {
+    auto const fastlanes_stream = streams[s_idx++];
+    decode_fastlanes_binary(subpass.pages,
+                            pass.chunks,
+                            num_rows,
+                            skip_rows,
+                            level_type_size,
+                            subpass_page_mask_span(),
+                            error_code.data(),
+                            fastlanes_stream);
+    // Explicit debug-dump launch is separated from decode so it cannot alter decode behavior.
+    debug_decode_fastlanes_binary(subpass.pages,
+                           pass.chunks,
+                           num_rows,
+                           skip_rows,
+                           level_type_size,
+                           subpass_page_mask_span(),
+                           error_code.data(),
+                           fastlanes_stream);
+  }
+
   // launch byte stream split decoder
   if (BitAnd(kernel_mask, decode_kernel_mask::BYTE_STREAM_SPLIT_FIXED_WIDTH_FLAT) != 0) {
     decode_data(decode_kernel_mask::BYTE_STREAM_SPLIT_FIXED_WIDTH_FLAT);

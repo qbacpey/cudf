@@ -51,6 +51,8 @@
 #include <numeric>
 #include <utility>
 
+#include <iostream>
+
 #ifndef CUDF_VERSION
 #error "CUDF_VERSION is not defined"
 #endif
@@ -58,6 +60,86 @@
 namespace cudf::io::parquet::detail {
 
 using namespace cudf::io::detail;
+
+namespace {
+
+bool is_fastlanes_bitpack_supported_int32_schema(
+  Type physical_type,
+  cudf::type_id leaf_type,
+  cuda::std::optional<LogicalType> const& logical_type,
+  std::optional<ConvertedType> const& converted_type)
+{
+  if (physical_type != Type::INT32) { return false; }
+
+  // Primary allowlist keyed by cudf leaf type for supported INT32-physical logical classes.
+  // This avoids false negatives when logical/converted annotations are absent or rewritten.
+  switch (leaf_type) {
+    case cudf::type_id::INT8:
+    case cudf::type_id::UINT8:
+    case cudf::type_id::INT16:
+    case cudf::type_id::UINT16:
+    case cudf::type_id::INT32:
+    case cudf::type_id::UINT32:
+    case cudf::type_id::TIMESTAMP_DAYS:
+    case cudf::type_id::DECIMAL32:
+    case cudf::type_id::DURATION_SECONDS:
+    case cudf::type_id::DURATION_MILLISECONDS: return true;
+    default: break;
+  }
+
+  // Plain INT32 without explicit logical annotation remains supported.
+  if (!logical_type.has_value() && !converted_type.has_value()) { return true; }
+
+  if (logical_type.has_value()) {
+    auto const& logical = *logical_type;
+
+    if (logical.type == LogicalType::INTEGER) {
+      auto const bit_width = logical.bit_width();
+      auto const is_signed_leaf =
+        leaf_type == cudf::type_id::INT8 || leaf_type == cudf::type_id::INT16 ||
+        leaf_type == cudf::type_id::INT32;
+      auto const is_unsigned_leaf =
+        leaf_type == cudf::type_id::UINT8 || leaf_type == cudf::type_id::UINT16 ||
+        leaf_type == cudf::type_id::UINT32;
+      return (is_signed_leaf || is_unsigned_leaf) &&
+             (bit_width == 8 || bit_width == 16 || bit_width == 32);
+    }
+
+    if (logical.type == LogicalType::DATE) { return leaf_type == cudf::type_id::TIMESTAMP_DAYS; }
+
+    if (logical.type == LogicalType::DECIMAL) { return leaf_type == cudf::type_id::DECIMAL32; }
+
+    if (logical.is_time_millis()) {
+      return leaf_type == cudf::type_id::DURATION_MILLISECONDS ||
+             leaf_type == cudf::type_id::DURATION_SECONDS;
+    }
+  }
+
+  if (converted_type.has_value()) {
+    switch (*converted_type) {
+      case ConvertedType::INT_8:
+      case ConvertedType::INT_16:
+      case ConvertedType::INT_32:
+        return leaf_type == cudf::type_id::INT8 || leaf_type == cudf::type_id::INT16 ||
+               leaf_type == cudf::type_id::INT32;
+      case ConvertedType::UINT_8:
+      case ConvertedType::UINT_16:
+      case ConvertedType::UINT_32:
+        return leaf_type == cudf::type_id::UINT8 || leaf_type == cudf::type_id::UINT16 ||
+               leaf_type == cudf::type_id::UINT32;
+      case ConvertedType::DATE: return leaf_type == cudf::type_id::TIMESTAMP_DAYS;
+      case ConvertedType::DECIMAL: return leaf_type == cudf::type_id::DECIMAL32;
+      case ConvertedType::TIME_MILLIS:
+        return leaf_type == cudf::type_id::DURATION_MILLISECONDS ||
+               leaf_type == cudf::type_id::DURATION_SECONDS;
+      default: break;
+    }
+  }
+
+  return false;
+}
+
+}  // namespace
 
 Compression to_parquet_compression(compression_type compression)
 {
@@ -742,6 +824,22 @@ std::vector<schema_tree_node> construct_parquet_schema_tree(
             // supported parquet encodings
             case column_encoding::PLAIN:
             case column_encoding::DICTIONARY: break;
+
+            case column_encoding::FASTLANES_BITPACK:
+              if (s.type != Type::INT32) {
+                CUDF_LOG_WARN(
+                  "FASTLANES_BITPACK encoding is only supported for INT32 column; the "
+                  "requested encoding will be ignored");
+                return;
+              }
+              if (!is_fastlanes_bitpack_supported_int32_schema(
+                    s.type, s.leaf_column->type().id(), s.logical_type, s.converted_type)) {
+                CUDF_LOG_WARN(
+                  "FASTLANES_BITPACK encoding is unsupported for this INT32 logical type; "
+                  "the requested encoding will be ignored");
+                return;
+              }
+              break;
 
             // all others
             default:

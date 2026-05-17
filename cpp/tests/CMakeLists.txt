@@ -346,6 +346,13 @@ ConfigureTest(
   PERCENT 100
 )
 ConfigureTest(
+  PARQUET_FASTLANES_TEST
+  io/parquet_common.cpp
+  io/parquet_fastlanes_test.cpp
+  GPUS 1
+  PERCENT 100
+)
+ConfigureTest(
   HYBRID_SCAN_TEST
   io/experimental/hybrid_scan_composer.cpp
   io/experimental/hybrid_scan_filters_test.cpp

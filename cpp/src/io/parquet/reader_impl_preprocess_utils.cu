@@ -343,6 +343,7 @@ std::string encoding_to_string(Encoding encoding)
     case Encoding::DELTA_BYTE_ARRAY: return "DELTA_BYTE_ARRAY";
     case Encoding::RLE_DICTIONARY: return "RLE_DICTIONARY";
     case Encoding::BYTE_STREAM_SPLIT: return "BYTE_STREAM_SPLIT";
+    case Encoding::FASTLANES_BITPACK: return "FASTLANES_BITPACK";
     case Encoding::NUM_ENCODINGS:
     default: return "UNKNOWN(" + std::to_string(static_cast<int>(encoding)) + ")";
   }
