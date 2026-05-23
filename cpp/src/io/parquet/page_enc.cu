@@ -532,15 +532,13 @@ __device__ encode_kernel_mask data_encoding_for_col(EncColumnChunk const* chunk,
         // Explicit fallback for RAW mode if runtime constraints are not met.
         return encode_kernel_mask::PLAIN;
       }
-      case column_encoding::FASTLANE_BITPACK_SPLIT64: {
-        auto const leaf_type = col_desc->leaf_column->type().id();
-        if (is_fastlanes_bitpack_split64_runtime_supported(
-              col_desc->physical_type, leaf_type, col_desc->max_rep_level)) {
-          return encode_kernel_mask::FASTLANE_BITPACK_SPLIT64;
-        }
-        // Explicit fallback for SPLIT64 mode if runtime constraints are not met.
+// SPLIT64 is hard-refused at writer_impl.cu metadata-validation time. Should never reach this
+// switch with a SPLIT64 request, but keep a defensive PLAIN fallback to avoid a missing-case
+// warning. Suppress the deprecation diagnostic on the case label only.
+#pragma nv_diag_suppress 1444
+      case column_encoding::FASTLANE_BITPACK_SPLIT64:
+#pragma nv_diag_default 1444
         return encode_kernel_mask::PLAIN;
-      }
       case column_encoding::FASTLANES_DELTA_BINARY: {
         auto const leaf_type = col_desc->leaf_column->type().id();
         if (is_fastlanes_delta_binary_runtime_supported(
@@ -2798,7 +2796,8 @@ CUDF_KERNEL void __launch_bounds__(block_size, 8)
                     device_span<codec_exec_result> comp_results,
                     uint8_t** pre_encoded_ptrs,
                     uint32_t* pre_encoded_sizes,
-                    bool write_v2_headers)
+                    bool write_v2_headers,
+                    encode_kernel_mask kernel_mask)
 {
   __shared__ __align__(8) page_enc_state_s<0> state_g;
 
@@ -2816,7 +2815,11 @@ CUDF_KERNEL void __launch_bounds__(block_size, 8)
   }
   __syncthreads();
 
-  if (not is_fastlanes_mask(s->page.kernel_mask)) { return; }
+  // FL-P4-R4: match `gpuEncodePageLevels`'s per-mask filter. Each call from the split
+  // RAW32 / NATIVE64 entry points launches over the full `pages` span but only the pages
+  // whose kernel_mask matches this invocation's mask have a registered `pre_encoded_ptrs`
+  // slot; skip everything else to avoid touching unrelated FastLanes pages on this stream.
+  if (BitAnd(s->page.kernel_mask, kernel_mask) == 0) { return; }
 
   if (t == 0) {
     uint8_t* dst       = s->cur;
@@ -3734,13 +3737,12 @@ void EncodePages(device_span<EncPage> pages,
   // determine which kernels to invoke
   auto kernel_mask = cudf::detail::transform_reduce(
     pages.begin(), pages.end(), mask_tform{}, uint32_t{0}, cuda::std::bit_or<uint32_t>{}, stream);
-  auto constexpr fastlanes_kernel_mask_bits = fastlanes_kernel_masks();
-  auto const has_fastlanes                  = (kernel_mask & fastlanes_kernel_mask_bits) != 0;
 
-  // get the number of streams we need from the pool
-  int nkernels = std::bitset<32>(kernel_mask).count();
-  if ((kernel_mask & fastlanes_kernel_mask_bits) == fastlanes_kernel_mask_bits) { nkernels--; }
-  auto streams = cudf::detail::fork_streams(stream, nkernels);
+  // get the number of streams we need from the pool. FL-P4-R4 dropped the previous
+  // `nkernels--` adjustment: each active FastLanes encoding (RAW32, NATIVE64) now consumes
+  // exactly one stream slot just like every other encoding bit.
+  int const nkernels = std::bitset<32>(kernel_mask).count();
+  auto streams       = cudf::detail::fork_streams(stream, nkernels);
 
   // A page is part of one column. This is launching 1 block per page. 1 block will exclusively
   // deal with one datatype.
@@ -3789,12 +3791,21 @@ void EncodePages(device_span<EncPage> pages,
       pages, comp_in, comp_out, comp_results, write_v2_headers);
   }
   // ========================================
-  // CPU/GPU FastLanes encoding block (RAW32, SPLIT64, NATIVE64)
+  // FastLanes encoding block: each active FastLanes encoding runs on its own forked stream
+  // slot, matching the per-encoding-bit pattern used by every other encoding branch above.
+  // SPLIT64 is hard-refused upstream in writer_impl.cu (see FL-P4-R1) and therefore never
+  // reaches this dispatcher; only RAW32 (CPU encode, INT32) and NATIVE64 (GPU encode,
+  // INT64) bits can be set.
   // ========================================
-  if (has_fastlanes) {
+  if (BitAnd(kernel_mask, encode_kernel_mask::FASTLANE_BITPACK_RAW) != 0) {
     auto const strm = streams[s_idx++];
-    fastlanes_encode_stage::run_fastlanes_cpu_encode(
-      pages, write_v2_headers, comp_in, comp_out, comp_results, fastlanes_kernel_mask_bits, strm);
+    fastlanes_encode_stage::run_fastlanes_raw32_encode(
+      pages, write_v2_headers, comp_in, comp_out, comp_results, strm);
+  }
+  if (BitAnd(kernel_mask, encode_kernel_mask::FASTLANES_DELTA_BINARY) != 0) {
+    auto const strm = streams[s_idx++];
+    fastlanes_encode_stage::run_fastlanes_native64_encode(
+      pages, write_v2_headers, comp_in, comp_out, comp_results, strm);
   }
   cudf::detail::join_streams(streams, stream);
 }

@@ -111,7 +111,9 @@ enum class column_encoding : int32_t {
   // Custom encodings:
   FASTLANE_BITPACK_RAW,
   FASTLANES_DELTA_BINARY,
-  FASTLANE_BITPACK_SPLIT64,
+  FASTLANE_BITPACK_SPLIT64 [[deprecated(
+    "FASTLANE_BITPACK_SPLIT64 is deprecated due to a known sub-vector page-padding bug; "
+    "use FASTLANES_DELTA_BINARY or DELTA_BINARY_PACKED for INT64 columns.")]],
 };
 
 /**

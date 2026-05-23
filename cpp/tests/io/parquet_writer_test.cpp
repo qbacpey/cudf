@@ -1961,25 +1961,6 @@ TEST_F(ParquetWriterTest, UserRequestedEncodings)
     EXPECT_NE(int64_bitpack_fmd.row_groups[0].columns[0].meta_data.encodings[0],
               Encoding::FASTLANE_BITPACK_RAW);
   }
-
-  {
-    cudf::io::table_input_metadata int64_metadata(int64_table);
-    int64_metadata.column_metadata[0]
-      .set_name("int64_fastlane_bitpack_split64")
-      .set_encoding(column_encoding::FASTLANE_BITPACK_SPLIT64)
-      .set_nullability(false);
-
-    auto const filepath_int64_split64 =
-      temp_env->get_temp_filepath("UserRequestedInt64FastLanesSplit64.parquet");
-    cudf::io::parquet_writer_options int64_split64_opts =
-      cudf::io::parquet_writer_options::builder(cudf::io::sink_info{filepath_int64_split64},
-                                                int64_table)
-        .metadata(int64_metadata);
-
-    cudf::test::log_capture log_cap{};
-    cudf::io::write_parquet(int64_split64_opts);
-    EXPECT_FALSE(log_cap.has_messages());
-  }
 }
 
 TEST_F(ParquetWriterTest, ListElementFieldIds)

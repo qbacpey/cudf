@@ -911,21 +911,15 @@ std::vector<schema_tree_node> construct_parquet_schema_tree(
               }
               break;
 
+// FASTLANE_BITPACK_SPLIT64 is intentionally marked [[deprecated]] in the public enum so user code
+// gets a compile-time warning. We still need to switch on it here to issue a hard runtime refusal,
+// so suppress the deprecation diagnostic locally for the case label only.
+#pragma nv_diag_suppress 1444
             case column_encoding::FASTLANE_BITPACK_SPLIT64:
-              if (s.type != Type::INT64) {
-                CUDF_LOG_WARN(
-                  "FASTLANE_BITPACK_SPLIT64 encoding is only supported for INT64 columns; the "
-                  "requested encoding will be ignored");
-                return;
-              }
-              if (!is_fastlanes_bitpack_supported_schema(
-                    s.type, s.leaf_column->type().id(), s.logical_type, s.converted_type)) {
-                CUDF_LOG_WARN(
-                  "FASTLANE_BITPACK_SPLIT64 encoding is unsupported for this logical type; "
-                  "the requested encoding will be ignored");
-                return;
-              }
-              break;
+#pragma nv_diag_default 1444
+              CUDF_FAIL(
+                "FASTLANE_BITPACK_SPLIT64 is deprecated due to a known sub-vector page-padding "
+                "bug; use FASTLANES_DELTA_BINARY or DELTA_BINARY_PACKED for INT64 columns.");
 
             case column_encoding::FASTLANES_DELTA_BINARY:
               if (s.type != Type::INT64) {

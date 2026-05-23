@@ -78,8 +78,12 @@ CUDF_HOST_DEVICE constexpr bool is_fastlanes_delta_binary_encode_enabled() { ret
 
 CUDF_HOST_DEVICE constexpr uint32_t fastlanes_bitpack_kernel_masks()
 {
-  return BitOr(
-    encode_kernel_mask::FASTLANE_BITPACK_RAW, encode_kernel_mask::FASTLANE_BITPACK_SPLIT64);
+  // FL-P4-R4 dropped the SPLIT64 bit from this aggregate. SPLIT64 is hard-refused upstream
+  // in writer_impl.cu (see FL-P4-R1), so its kernel-mask bit is never set; including it
+  // here would only cause `fastlanes_kernel_masks()` to mismatch the actual `kernel_mask`
+  // OR-fold from real pages, which previously needed the `nkernels--` accounting fix-up in
+  // `page_enc.cu`. With SPLIT64 dropped, no fix-up is required.
+  return static_cast<uint32_t>(encode_kernel_mask::FASTLANE_BITPACK_RAW);
 }
 
 CUDF_HOST_DEVICE constexpr uint32_t fastlanes_kernel_masks()
