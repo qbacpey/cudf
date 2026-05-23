@@ -4,45 +4,27 @@
  */
 
 // Note (FL-P3-R1 follow-up): this source file is intentionally source-included from
-// `page_enc.cu` and therefore inherits the enclosing `cudf::io::parquet::detail::` namespace.
-// The slim path-selector header is included here so the symbols defined below match the
-// declarations exactly; including it also documents that selector mutations affect this TU.
-#include "fastlanes_page_encoder_path.hpp"
+// `page_enc.cu` and therefore inherits the enclosing `cudf::io::parquet::detail::` namespace
+// plus the local templated kernels defined there (e.g. `gpuGatherSinglePageTyped`,
+// `gpuEncodePageLevels`, `gpuEncodeCpuPages`).
+//
+// FL-P3-R4 removed the test-only A/B encode-path selector that previously lived here, so this
+// file no longer pulls in the slim path-selector header.
 
 namespace fastlanes_encode_stage {
 
 namespace parquet_fastlanes = cudf::io::parquet::detail::fastlanes;
 
 // =============================================================================
-// FL-P3-R2: Encode-path selector (test-only A/B harness)
-// =============================================================================
-// The selector is thread-local so test fixtures can flip the active path on a single thread
-// without races, and so a forgotten override cannot bleed across worker threads.
-
-namespace {
-
-fastlanes_encode_path& tls_active_encode_path()
-{
-  static thread_local fastlanes_encode_path path = fastlanes_encode_path::legacy_per_page;
-  return path;
-}
-
-}  // namespace
-
-fastlanes_encode_path get_encode_path() { return tls_active_encode_path(); }
-
-void set_encode_path(fastlanes_encode_path path) { tls_active_encode_path() = path; }
-
-// =============================================================================
-// FL-P3-R2: Page categorization data structures
+// Page categorization (single-pass host-side classifier)
 // =============================================================================
 
 /**
  * @brief Lightweight per-page category record built during the single-pass classification.
  *
  * Carries everything the encode loop needs to dispatch to the right encoder without re-reading
- * the host page metadata. `page_idx` is the original page slot in `pages` and remains the
- * canonical index for upload-buffer placement in both A/B paths.
+ * the host page metadata. `page_idx` is the original page slot in `pages` and is the canonical
+ * key for upload-buffer placement, so per-category iteration cannot perturb downstream layout.
  */
 struct fastlanes_page_category {
   size_t page_idx;
@@ -55,8 +37,9 @@ struct fastlanes_page_category {
  * @brief Pages grouped by FastLanes encoding mode, preserving original page_idx order.
  *
  * Each per-mode vector is appended to in ascending `page_idx`, so the categorized encode
- * loop produces the same per-page payloads in the same upload-buffer slots as the legacy
- * straight-line loop. This is what makes the FL-P3-R2 A/B parity assertion meaningful.
+ * loop places per-page payloads in the same upload-buffer slots that the pre-refactor
+ * straight-line loop did. (Verified by the FL-P3-R2 byte-identity A/B harness before
+ * removal in FL-P3-R4.)
  */
 struct fastlanes_categorized_pages {
   std::vector<fastlanes_page_category> raw32_pages;
@@ -101,7 +84,7 @@ fastlanes_categorized_pages categorize_fastlanes_pages(std::vector<EncPage> cons
 }
 
 // =============================================================================
-// Encoder helpers (shared by legacy and categorized paths)
+// Upload-side staging and downstream kernel launch
 // =============================================================================
 
 struct fastlanes_cpu_upload_buffers {
@@ -127,16 +110,6 @@ std::vector<EncPage> copy_fastlanes_pages_to_host(device_span<EncPage> pages,
                   stream.value());
   cudaStreamSynchronize(stream.value());
   return host_pages;
-}
-
-fastlanes_page_type_info gather_fastlanes_page_type_info(device_span<EncPage> pages,
-                                                         size_t page_idx,
-                                                         rmm::cuda_stream_view stream)
-{
-  rmm::device_scalar<fastlanes_page_type_info> d_type_info(fastlanes_page_type_info{}, stream);
-  gpuGatherSinglePageTyped<int32_t, encode_block_size>
-    <<<1, encode_block_size, 0, stream.value()>>>(pages, page_idx, nullptr, d_type_info.data());
-  return d_type_info.value(stream);
 }
 
 template <typename HeaderT>
@@ -173,69 +146,6 @@ void ensure_fastlanes_page_fits_reserved_size(size_t page_idx,
                              " reserved=" + std::to_string(page.max_data_size) +
                              " num_leaf=" + std::to_string(page.num_leaf_values));
   }
-}
-
-uint32_t register_fastlanes_upload(size_t page_idx,
-                                   parquet_fastlanes::EncodedPageResult&& result,
-                                   fastlanes_cpu_upload_buffers& upload_buffers)
-{
-  auto const encoded_blob_size = static_cast<uint32_t>(result.total_size());
-  upload_buffers.encoded_buffers.push_back(std::move(result.device_blob));
-  upload_buffers.host_upload_ptrs[page_idx] =
-    static_cast<uint8_t*>(upload_buffers.encoded_buffers.back().data());
-  upload_buffers.host_upload_sizes[page_idx] = encoded_blob_size;
-  return encoded_blob_size;
-}
-
-parquet_fastlanes::EncodedPageResult encode_fastlanes_int32_page(
-  device_span<EncPage> pages,
-  size_t page_idx,
-  uint32_t num_values,
-  parquet_fastlanes::FastLanesInt32Encoder& encoder,
-  rmm::cuda_stream_view stream)
-{
-  rmm::device_uvector<uint32_t> gather_buffer(num_values, stream);
-  gpuGatherSinglePageTyped<uint32_t, encode_block_size>
-    <<<1, encode_block_size, 0, stream.value()>>>(pages, page_idx, gather_buffer.data(), nullptr);
-  cudaStreamSynchronize(stream.value());
-
-  return encoder.encode_page(reinterpret_cast<int32_t const*>(gather_buffer.data()),
-                             num_values,
-                             stream);
-}
-
-parquet_fastlanes::EncodedPageResult encode_fastlanes_int64_page(
-  device_span<EncPage> pages,
-  size_t page_idx,
-  uint32_t num_values,
-  parquet_fastlanes::FastLanesInt64Split32Encoder& encoder,
-  rmm::cuda_stream_view stream)
-{
-  rmm::device_uvector<uint64_t> gather_buffer(num_values, stream);
-  gpuGatherSinglePageTyped<uint64_t, encode_block_size>
-    <<<1, encode_block_size, 0, stream.value()>>>(pages, page_idx, gather_buffer.data(), nullptr);
-  cudaStreamSynchronize(stream.value());
-
-  return encoder.encode_page(reinterpret_cast<int64_t const*>(gather_buffer.data()),
-                             num_values,
-                             stream);
-}
-
-parquet_fastlanes::EncodedPageResult encode_fastlanes_int64_native_page(
-  device_span<EncPage> pages,
-  size_t page_idx,
-  uint32_t num_values,
-  parquet_fastlanes::FastLanesInt64NativeEncoder& encoder,
-  rmm::cuda_stream_view stream)
-{
-  rmm::device_uvector<uint64_t> gather_buffer(num_values, stream);
-  gpuGatherSinglePageTyped<uint64_t, encode_block_size>
-    <<<1, encode_block_size, 0, stream.value()>>>(pages, page_idx, gather_buffer.data(), nullptr);
-  cudaStreamSynchronize(stream.value());
-
-  return encoder.encode_page(reinterpret_cast<int64_t const*>(gather_buffer.data()),
-                             num_values,
-                             stream);
 }
 
 void upload_fastlanes_results_and_launch(device_span<EncPage> pages,
@@ -277,14 +187,34 @@ void upload_fastlanes_results_and_launch(device_span<EncPage> pages,
 }
 
 // =============================================================================
-// Per-page encode dispatch shared between A/B paths (FL-P3-R2)
+// Batched per-encoding encode path
 // =============================================================================
 //
-// Both the legacy path and the categorized path call this helper to encode a single page,
-// validate its header, size-check it, and register it into the upload buffers. Keeping the
-// per-page work in a single helper guarantees byte identity across the two paths: the only
-// difference between them is the iteration order over `pages`.
+// Within each FastLanes encoding mode (RAW32, SPLIT64, NATIVE64):
+//   1. Allocate per-page gather buffers and launch ALL gather kernels on the same stream
+//      with NO per-page sync.
+//   2. Hand the host-side array of device gather pointers to the encoder's `encode_pages`
+//      batch API in a single call. The encoder is responsible for any internal D->H/H->D
+//      shuffling needed to produce the encoded device blobs.
+//   3. Batch-read the page headers (first `header_probe_bytes` of each encoded blob) D->H
+//      with one `cudaStreamSynchronize` for the whole category, then run the PRE_DELTA
+//      header-validation check on each.
+//   4. Splice the per-page encoded device buffers / pointers / sizes into `upload_buffers`
+//      keyed by the original `page_idx`, so the downstream `gpuEncodePageLevels` and
+//      `gpuEncodeCpuPages` launches consume identical slot placement.
+//
+// Sync audit: this path emits, from our code, exactly ONE `cudaStreamSynchronize` per
+// non-empty encoding category (inside `validate_category_headers_batched`). Combined with
+// the single entry-time sync inside `copy_fastlanes_pages_to_host`, total sync count is at
+// most 1 + 3 = 4 per `run_fastlanes_cpu_encode` call, independent of page count. The encoder
+// may emit additional internal syncs; those are not in this TU's scope.
 
+/**
+ * @brief Lazy holder for the three per-encoding encoder instances.
+ *
+ * Encoders are constructed on first use so workloads that touch only one encoding pay no
+ * setup cost for the other two.
+ */
 struct fastlanes_encoder_lazy_pool {
   std::unique_ptr<parquet_fastlanes::FastLanesInt32Encoder> encoder_i32;
   std::unique_ptr<parquet_fastlanes::FastLanesInt64Split32Encoder> encoder_i64_split32;
@@ -314,135 +244,6 @@ struct fastlanes_encoder_lazy_pool {
   }
 };
 
-void encode_one_fastlanes_page(device_span<EncPage> pages,
-                               std::vector<EncPage> const& host_pages,
-                               size_t page_idx,
-                               uint32_t num_values,
-                               encode_kernel_mask kernel_mask,
-                               fastlanes_encoder_lazy_pool& encoders,
-                               fastlanes_cpu_upload_buffers& upload_buffers,
-                               rmm::cuda_stream_view stream)
-{
-  auto const type_info = gather_fastlanes_page_type_info(pages, page_idx, stream);
-
-  if (type_info.physical_type == Type::INT32) {
-    auto result = encode_fastlanes_int32_page(
-      pages, page_idx, num_values, encoders.get_i32(), stream);
-
-    auto const hdr = ::fastlanes::PageHeader::deserialize(result.host_blob.data());
-    validate_fastlanes_pre_delta_policy(kernel_mask, hdr);
-
-    auto const encoded_blob_size = static_cast<uint32_t>(result.total_size());
-    ensure_fastlanes_page_fits_reserved_size(page_idx, host_pages[page_idx], encoded_blob_size);
-
-    register_fastlanes_upload(page_idx, std::move(result), upload_buffers);
-    return;
-  }
-
-  if (type_info.physical_type == Type::INT64 &&
-      (type_info.logical_type == cudf::type_id::INT64 ||
-       type_info.logical_type == cudf::type_id::UINT64)) {
-    auto const encoding = fastlanes_encoding_for_mask(kernel_mask);
-
-    auto result = [&]() {
-      if (encoding == Encoding::FASTLANE_BITPACK_SPLIT64) {
-        return encode_fastlanes_int64_page(
-          pages, page_idx, num_values, encoders.get_i64_split32(), stream);
-      }
-      if (encoding == Encoding::FASTLANES_DELTA_BINARY) {
-        return encode_fastlanes_int64_native_page(
-          pages, page_idx, num_values, encoders.get_i64_native(), stream);
-      }
-      throw std::invalid_argument(
-        "FastLanes INT64 path only supports SPLIT64 and FASTLANES_DELTA_BINARY encodings");
-    }();
-
-    auto const hdr = ::fastlanes::PageHeader::deserialize(result.host_blob.data());
-    validate_fastlanes_pre_delta_policy(kernel_mask, hdr);
-
-    auto const encoded_blob_size = static_cast<uint32_t>(result.total_size());
-    ensure_fastlanes_page_fits_reserved_size(page_idx, host_pages[page_idx], encoded_blob_size);
-
-    register_fastlanes_upload(page_idx, std::move(result), upload_buffers);
-    return;
-  }
-
-  throw std::invalid_argument(
-    "FastLanes encoding supports selected INT32 and INT64 logical types in flat pages");
-}
-
-// =============================================================================
-// Path A: Legacy straight-line per-page loop
-// =============================================================================
-//
-// Preserved as the default and as the reference path for the FL-P3-R2 A/B parity harness.
-// This path is intended to remain bit-for-bit identical to the pre-refactor behavior so
-// upstream baselines stay comparable.
-
-void run_fastlanes_cpu_encode_legacy(device_span<EncPage> pages,
-                                     std::vector<EncPage> const& host_pages,
-                                     fastlanes_cpu_upload_buffers& upload_buffers,
-                                     rmm::cuda_stream_view stream)
-{
-  fastlanes_encoder_lazy_pool encoders;
-
-  // Preserved-as-is dead-code from the pre-refactor implementation. Kept so the legacy path
-  // remains a faithful reference for parity comparisons; removed in the categorized path.
-  std::unordered_map<uint32_t, uint32_t> chunk_page_counters;
-
-  for (size_t page_idx = 0; page_idx < pages.size(); ++page_idx) {
-    if (not is_fastlanes_mask(host_pages[page_idx].kernel_mask)) { continue; }
-
-    auto const chunk_id = host_pages[page_idx].chunk_id;
-    (void)chunk_page_counters[chunk_id]++;
-
-    uint32_t const num_values = host_pages[page_idx].num_leaf_values;
-    if (num_values == 0) { continue; }
-
-    encode_one_fastlanes_page(pages,
-                              host_pages,
-                              page_idx,
-                              num_values,
-                              host_pages[page_idx].kernel_mask,
-                              encoders,
-                              upload_buffers,
-                              stream);
-  }
-}
-
-// =============================================================================
-// Path B: Categorized batched encode (FL-P3-R3 phase-4b/4c)
-// =============================================================================
-//
-// The pre-FL-P3-R3 version of this path (categorized but still per-page) lives in git history
-// as a stepping stone; here we implement the actual phase-4b/4c batching:
-//   1. Within each FastLanes encoding mode (RAW32, SPLIT64, NATIVE64), allocate per-page
-//      gather buffers, launch ALL gather kernels on the same stream without per-page sync.
-//   2. Hand the host-side array of device gather pointers to the encoder's `encode_pages`
-//      batch API in a single call. The encoder is responsible for any internal D->H/H->D
-//      shuffling needed to produce the encoded device blobs.
-//   3. Batch-read the page headers (first `header_probe_bytes` of each encoded blob) D->H
-//      with one `cudaStreamSynchronize` for the whole category, then run the PRE_DELTA
-//      header-validation check on each.
-//   4. Splice the per-page encoded device buffers / pointers / sizes into `upload_buffers`
-//      keyed by the original `page_idx`, so the downstream `gpuEncodePageLevels` and
-//      `gpuEncodeCpuPages` launches consume the exact same slot layout as the legacy path.
-//
-// Parity contract (asserted by the FL-P3-R2 A/B harness):
-//   * Per-page encoded payload bytes are identical across paths: the encoder is functionally
-//     pure given identical input, and we feed identical gathered values.
-//   * Per-page upload-buffer slot placement is identical: both paths key `host_upload_ptrs`
-//     and `host_upload_sizes` by the same `page_idx`.
-//   * Only `encoded_buffers` push-back order differs (encoding-group order here vs. page_idx
-//     order in legacy). That vector only owns RMM allocations; nothing downstream reads it
-//     positionally.
-//
-// Sync audit (FL-P3-R3 acceptance criterion): this path issues NO per-page
-// `cudaStreamSynchronize` from our code. The only host-visible syncs we emit are:
-//   - One sync per category inside the header-validation batch.
-// The encoder's batch entry point may emit its own internal syncs, but those are out of
-// FL-P3-R3 scope (only `fastlanes_page_encoder.cu` is editable here).
-
 /**
  * @brief Single host-visible probe size used for batched header validation.
  *
@@ -458,8 +259,7 @@ constexpr size_t header_probe_bytes = 32;
  *
  * Issues one async D->H copy per page from the encoded device blob's leading bytes onto a
  * single host scratch buffer, then performs a SINGLE `cudaStreamSynchronize` for the entire
- * category before running per-page `validate_fastlanes_pre_delta_policy`. This replaces the
- * legacy path's per-page host_blob inspection while still exercising the same validator.
+ * category before running per-page `validate_fastlanes_pre_delta_policy`.
  */
 void validate_category_headers_batched(
   std::vector<fastlanes_page_category> const& category,
@@ -544,8 +344,8 @@ void encode_category_batched(device_span<EncPage> pages,
   // Phase 3: batched header validation -- one sync covers the whole category.
   validate_category_headers_batched(category, enc_ptrs, enc_sizes, stream);
 
-  // Phase 4: register per-page uploads. Slot placement matches the legacy path because
-  // both paths key on `cat.page_idx`.
+  // Phase 4: register per-page uploads. Slot placement is keyed on `cat.page_idx` so the
+  // downstream kernels see the same per-page layout regardless of category iteration order.
   for (size_t i = 0; i < n; ++i) {
     auto const& cat = category[i];
     auto const sz   = enc_sizes[i];
@@ -558,11 +358,21 @@ void encode_category_batched(device_span<EncPage> pages,
   }
 }
 
-void run_fastlanes_cpu_encode_categorized(device_span<EncPage> pages,
-                                          std::vector<EncPage> const& host_pages,
-                                          fastlanes_cpu_upload_buffers& upload_buffers,
-                                          rmm::cuda_stream_view stream)
+// =============================================================================
+// Entry point
+// =============================================================================
+
+void run_fastlanes_cpu_encode(device_span<EncPage> pages,
+                              bool write_v2_headers,
+                              device_span<device_span<uint8_t const>> comp_in,
+                              device_span<device_span<uint8_t>> comp_out,
+                              device_span<codec_exec_result> comp_results,
+                              uint32_t fastlanes_kernel_mask_bits,
+                              rmm::cuda_stream_view stream)
 {
+  auto host_pages = copy_fastlanes_pages_to_host(pages, stream);
+  fastlanes_cpu_upload_buffers upload_buffers(pages.size());
+
   auto const categorized = categorize_fastlanes_pages(host_pages);
 
   fastlanes_encoder_lazy_pool encoders;
@@ -590,32 +400,6 @@ void run_fastlanes_cpu_encode_categorized(device_span<EncPage> pages,
                                      encoders.get_i64_native(),
                                      upload_buffers,
                                      stream);
-  }
-}
-
-// =============================================================================
-// Entry point: dispatches between A/B paths based on the active selector
-// =============================================================================
-
-void run_fastlanes_cpu_encode(device_span<EncPage> pages,
-                              bool write_v2_headers,
-                              device_span<device_span<uint8_t const>> comp_in,
-                              device_span<device_span<uint8_t>> comp_out,
-                              device_span<codec_exec_result> comp_results,
-                              uint32_t fastlanes_kernel_mask_bits,
-                              rmm::cuda_stream_view stream)
-{
-  auto host_pages = copy_fastlanes_pages_to_host(pages, stream);
-  fastlanes_cpu_upload_buffers upload_buffers(pages.size());
-
-  switch (get_encode_path()) {
-    case fastlanes_encode_path::categorized_per_page:
-      run_fastlanes_cpu_encode_categorized(pages, host_pages, upload_buffers, stream);
-      break;
-    case fastlanes_encode_path::legacy_per_page:
-    default:
-      run_fastlanes_cpu_encode_legacy(pages, host_pages, upload_buffers, stream);
-      break;
   }
 
   upload_fastlanes_results_and_launch(pages,

@@ -131,10 +131,12 @@ void apply_encodings(cudf::io::table_input_metadata& table_metadata,
  * @brief Initialize memory resource based on environment and configuration
  *
  * Checks LIBCUDF_USE_MANAGED_MEMORY environment variable to decide
- * between device and managed memory.
+ * between device and managed memory. (Managed memory branch currently delegates to the
+ * device pool/async resource; see the .cpp for the FL-P3-R5 compatibility notes.)
  *
  * @param is_pool_used Whether to use memory pool
- * @return Shared pointer to memory resource
+ * @return `any_resource` of a device-accessible memory resource (compatible with
+ *         `cudf::set_current_device_resource`).
  */
-[[nodiscard]] std::shared_ptr<rmm::mr::device_memory_resource> init_memory_resource(
+[[nodiscard]] cuda::mr::any_resource<cuda::mr::device_accessible> init_memory_resource(
   bool is_pool_used = true);

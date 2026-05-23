@@ -25,7 +25,7 @@ void process_parquet_by_row_group(std::string const& input_file, std::string con
 
   bool constexpr is_pool_used = true;
   auto resource               = create_memory_resource(is_pool_used);
-  cudf::set_current_device_resource(resource.get());
+  cudf::set_current_device_resource(resource);
 
   // Step 1: Read metadata to get the number of row groups
   auto const source_info    = cudf::io::source_info(input_file);

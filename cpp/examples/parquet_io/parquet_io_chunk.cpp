@@ -724,7 +724,7 @@ int main(int argc, char const** argv)
 
   // Initialize memory resource
   auto resource = init_memory_resource(/*is_pool_used=*/true);
-  cudf::set_current_device_resource(resource.get());
+  cudf::set_current_device_resource(resource);
 
   try {
     // Step 1: Process file row group by row group

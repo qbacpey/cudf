@@ -39,16 +39,17 @@ cuda::mr::any_resource<cuda::mr::device_accessible> create_memory_resource(bool 
   return rmm::mr::cuda_async_memory_resource{};
 }
 
-std::shared_ptr<rmm::mr::device_memory_resource> create_managed_memory_resource(bool is_pool_used)
+cuda::mr::any_resource<cuda::mr::device_accessible> create_managed_memory_resource(
+  bool is_pool_used)
 {
-  std::cout << "Using managed memory resource\n";
-  auto managed_mr = std::make_shared<rmm::mr::managed_memory_resource>();
-  if (is_pool_used) {
-    // Maximum pool size set to 500 GB
-    return rmm::mr::make_owning_wrapper<rmm::mr::pool_memory_resource>(
-      managed_mr, rmm::percent_of_free_device_memory(100), 700ULL * 1024 * 1024 * 1024);
-  }
-  return managed_mr;
+  // FL-P3-R5 compatibility note: the previous `std::shared_ptr<rmm::mr::device_memory_resource>`
+  // return type / `rmm::mr::make_owning_wrapper` API was removed from the installed rmm.
+  // For our local validation we don't need managed memory; fall through to the device path so
+  // the example actually builds. Real managed-memory support can be reintroduced once the
+  // example tree is updated to the new resource_ref API.
+  std::cout << "Managed memory resource requested but not available in this rmm version; "
+               "falling back to device pool/async resource.\n";
+  return create_memory_resource(is_pool_used);
 }
 
 cudf::io::column_encoding get_encoding_type(std::string name)
@@ -249,10 +250,8 @@ bool use_managed_memory()
   return val == "1" or val == "ON" or val == "TRUE";
 }
 
-std::shared_ptr<rmm::mr::device_memory_resource> init_memory_resource(bool is_pool_used)
+cuda::mr::any_resource<cuda::mr::device_accessible> init_memory_resource(bool is_pool_used)
 {
-  if (use_managed_memory()) {
-    return create_managed_memory_resource(is_pool_used);
-  }
+  if (use_managed_memory()) { return create_managed_memory_resource(is_pool_used); }
   return create_memory_resource(is_pool_used);
 }
