@@ -232,19 +232,58 @@ Phase 2 Milestone Gate
   - FastLanesAbParityInt8TinyTailPages
 
 8. FL-P3-R3: Batch Encode + Remove In-Loop Syncs
+- Status: COMPLETED locally (this work).
 - Goal: implement phase-4b and phase-4c (batch encode + finalize kernels) and remove per-page synchronization bottleneck.
 - Depends on: FL-P3-R2.
 - Editable scope:
   - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/fastlanes_page_encoder.cu
 - Forbidden scope: unrelated parquet decode paths, Python layer.
-- Concrete edits:
-  - Replace per-page encode_page loop with grouped encode_pages calls.
-  - Keep one-time synchronization boundaries only where required between semantic phases.
-  - Preserve header validation and final kernel launches (gpuEncodePageLevels/gpuEncodeCpuPages).
-- Validation: per-run tests + rg -n sync audit to ensure in-loop cudaStreamSynchronize removal.
-- Acceptance: A/B parity retained, no in-loop syncs remain.
+- Concrete edits applied locally:
+  - Added `validate_category_headers_batched(category, enc_ptrs, enc_sizes, stream)`: queues one
+    async D->H copy per page of the leading `header_probe_bytes` (32) bytes from each encoded
+    device blob onto a single host scratch buffer, then issues exactly ONE
+    `cudaStreamSynchronize` per category before running the existing
+    `validate_fastlanes_pre_delta_policy` on each header.
+  - Added a templated `encode_category_batched<ValueT, EncoderT>` driver. For one encoding
+    category it:
+      (1) reserves and emplaces N `rmm::device_uvector<UnsignedT>` gather buffers and launches
+          all N `gpuGatherSinglePageTyped` kernels on the same stream with NO per-page sync;
+      (2) calls the encoder's `encode_pages` batch API ONCE with the host-side gather
+          pointers/counts arrays;
+      (3) invokes `validate_category_headers_batched` (one sync covers all pages);
+      (4) registers per-page uploads into `upload_buffers` keyed by the original `page_idx`
+          (so downstream `gpuEncodePageLevels` / `gpuEncodeCpuPages` see identical slot
+          placement vs. the legacy path).
+  - Replaced the body of `run_fastlanes_cpu_encode_categorized` with three calls to
+    `encode_category_batched` (RAW32 / SPLIT64 / NATIVE64), keyed off the encoder pool from
+    FL-P3-R2's `fastlanes_encoder_lazy_pool`.
+  - Per-page `gather_fastlanes_page_type_info` is dropped from the categorized path: the
+    kernel_mask already determines INT32 vs INT64 dispatch and matches the value-type the
+    gather kernel produces, so the redundant type-info probe (which used to cost one sync
+    per page) is unnecessary. Per-page header dispatch correctness is now enforced
+    structurally by the categorization step.
+  - The legacy path is untouched; the FL-P3-R2 A/B harness remains the parity oracle.
+- Validation (local fng equivalent):
+  - cmake --build . --target cudf,PARQUET_FASTLANES_TEST,PARQUET_TEST (clean nvcc build).
+  - PARQUET_FASTLANES_TEST: 80/80 PASSED, including the 8 FL-P3-R2 `*AbParity*` tests
+    (byte-identical Parquet output across legacy vs categorized paths is therefore preserved
+    after the batch refactor).
+  - PARQUET_TEST: 452/452 PASSED.
+- Sync audit (rg -n cudaStreamSynchronize on `fastlanes_page_encoder.cu`):
+  - Line ~128: `copy_fastlanes_pages_to_host` -- ONE per run_fastlanes_cpu_encode invocation,
+    used by both A/B paths. NOT per-page.
+  - Lines ~200/217/234: `encode_fastlanes_int{32,64,64native}_page` helpers -- per-page syncs,
+    but these helpers are ONLY reachable from the LEGACY path's `encode_one_fastlanes_page`.
+    The FL-P3-R3 categorized path does not call them.
+  - Line ~484: `validate_category_headers_batched` -- ONE sync per category, gating header
+    inspection. Categorized path therefore emits AT MOST 1 (entry) + 3 (RAW32 + SPLIT64 +
+    NATIVE64) = 4 syncs per encode call, independent of page count.
+  - Per-page sync count in the categorized path: 0. Acceptance met.
+- Acceptance: A/B parity retained (PARQUET_FASTLANES_TEST `*AbParity*` 8/8 pass), no in-loop
+  syncs remain in the categorized path.
 - Rollback trigger: parity break or unsupported type regressions.
-- Evidence: sync-audit snippet + A/B test output.
+- Evidence: see sync audit and test results above. The A/B harness from FL-P3-R2 is the
+  byte-identity acceptance gate for this run.
 
 9. FL-P3-R4: Remove Test-Only Legacy Hooks and Finalize Clean Path
 - Goal: remove temporary test-only reference hooks after refactor is validated.

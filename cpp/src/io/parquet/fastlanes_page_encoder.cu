@@ -411,19 +411,152 @@ void run_fastlanes_cpu_encode_legacy(device_span<EncPage> pages,
 }
 
 // =============================================================================
-// Path B: Categorized per-page loop (FL-P3-R2 scaffolding for the FL-P3-R3 batch refactor)
+// Path B: Categorized batched encode (FL-P3-R3 phase-4b/4c)
 // =============================================================================
 //
-// Identical per-page work as the legacy path, but iteration order is grouped by encoding
-// mode (RAW32 -> SPLIT64 -> NATIVE64) instead of strict page_idx order. Within each group
-// pages are processed in ascending page_idx, and upload-buffer slots are still keyed by
-// page_idx, so the resulting per-page payloads are placed in identical upload positions.
-// This is what makes the FL-P3-R2 A/B harness able to assert byte identity on the encoded
-// Parquet output while still exercising the new categorization data structure.
+// The pre-FL-P3-R3 version of this path (categorized but still per-page) lives in git history
+// as a stepping stone; here we implement the actual phase-4b/4c batching:
+//   1. Within each FastLanes encoding mode (RAW32, SPLIT64, NATIVE64), allocate per-page
+//      gather buffers, launch ALL gather kernels on the same stream without per-page sync.
+//   2. Hand the host-side array of device gather pointers to the encoder's `encode_pages`
+//      batch API in a single call. The encoder is responsible for any internal D->H/H->D
+//      shuffling needed to produce the encoded device blobs.
+//   3. Batch-read the page headers (first `header_probe_bytes` of each encoded blob) D->H
+//      with one `cudaStreamSynchronize` for the whole category, then run the PRE_DELTA
+//      header-validation check on each.
+//   4. Splice the per-page encoded device buffers / pointers / sizes into `upload_buffers`
+//      keyed by the original `page_idx`, so the downstream `gpuEncodePageLevels` and
+//      `gpuEncodeCpuPages` launches consume the exact same slot layout as the legacy path.
 //
-// FL-P3-R3 will replace the inner per-page loops with grouped encode_pages batch calls and
-// drop the per-page sync; the categorization scaffolding introduced here is what enables
-// that change without touching the dispatch outside this function.
+// Parity contract (asserted by the FL-P3-R2 A/B harness):
+//   * Per-page encoded payload bytes are identical across paths: the encoder is functionally
+//     pure given identical input, and we feed identical gathered values.
+//   * Per-page upload-buffer slot placement is identical: both paths key `host_upload_ptrs`
+//     and `host_upload_sizes` by the same `page_idx`.
+//   * Only `encoded_buffers` push-back order differs (encoding-group order here vs. page_idx
+//     order in legacy). That vector only owns RMM allocations; nothing downstream reads it
+//     positionally.
+//
+// Sync audit (FL-P3-R3 acceptance criterion): this path issues NO per-page
+// `cudaStreamSynchronize` from our code. The only host-visible syncs we emit are:
+//   - One sync per category inside the header-validation batch.
+// The encoder's batch entry point may emit its own internal syncs, but those are out of
+// FL-P3-R3 scope (only `fastlanes_page_encoder.cu` is editable here).
+
+/**
+ * @brief Single host-visible probe size used for batched header validation.
+ *
+ * The PageHeader fields that participate in validation live in the first 24 bytes
+ * (OFFSET_MIN_VALUE_HIGH_BITS = 20, + sizeof(uint32_t)). Rounded up to 32 for alignment so
+ * a single tight D->H copy per page covers everything `PageHeader::deserialize` reads. The
+ * full on-disk header is larger but the trailing bytes do not affect PRE_DELTA validation.
+ */
+constexpr size_t header_probe_bytes = 32;
+
+/**
+ * @brief Batched header validator.
+ *
+ * Issues one async D->H copy per page from the encoded device blob's leading bytes onto a
+ * single host scratch buffer, then performs a SINGLE `cudaStreamSynchronize` for the entire
+ * category before running per-page `validate_fastlanes_pre_delta_policy`. This replaces the
+ * legacy path's per-page host_blob inspection while still exercising the same validator.
+ */
+void validate_category_headers_batched(
+  std::vector<fastlanes_page_category> const& category,
+  std::vector<uint8_t*> const& enc_ptrs,
+  std::vector<uint32_t> const& enc_sizes,
+  rmm::cuda_stream_view stream)
+{
+  size_t const n = category.size();
+  if (n == 0) { return; }
+
+  std::vector<uint8_t> header_scratch(n * header_probe_bytes, uint8_t{0});
+
+  for (size_t i = 0; i < n; ++i) {
+    if (enc_ptrs[i] == nullptr || enc_sizes[i] == 0) { continue; }
+    auto const probe = std::min(static_cast<size_t>(enc_sizes[i]), header_probe_bytes);
+    cudaMemcpyAsync(header_scratch.data() + i * header_probe_bytes,
+                    enc_ptrs[i],
+                    probe,
+                    cudaMemcpyDeviceToHost,
+                    stream.value());
+  }
+  cudaStreamSynchronize(stream.value());
+
+  for (size_t i = 0; i < n; ++i) {
+    if (enc_ptrs[i] == nullptr || enc_sizes[i] == 0) { continue; }
+    auto const hdr =
+      ::fastlanes::PageHeader::deserialize(header_scratch.data() + i * header_probe_bytes);
+    validate_fastlanes_pre_delta_policy(category[i].kernel_mask, hdr);
+  }
+}
+
+/**
+ * @brief Templated batched-encode driver for one encoding category.
+ *
+ * `ValueT` is the signed integer type the encoder consumes (`int32_t` for RAW32, `int64_t`
+ * for SPLIT64/NATIVE64). The gather kernel produces unsigned buffers of the matching width.
+ *
+ * Lifetimes: `gather_buffers` owns the RMM allocations for the gather staging area and must
+ * outlive the encoder's `encode_pages` call. The encoder reads from these device pointers
+ * during its own D->H staging; once it returns, the gather buffers can be released.
+ */
+template <typename ValueT, typename EncoderT>
+void encode_category_batched(device_span<EncPage> pages,
+                             std::vector<EncPage> const& host_pages,
+                             std::vector<fastlanes_page_category> const& category,
+                             EncoderT& encoder,
+                             fastlanes_cpu_upload_buffers& upload_buffers,
+                             rmm::cuda_stream_view stream)
+{
+  size_t const n = category.size();
+  if (n == 0) { return; }
+
+  using UnsignedT = std::make_unsigned_t<ValueT>;
+  static_assert(sizeof(UnsignedT) == sizeof(ValueT),
+                "Gather buffer unsigned type must match encoder value-type width");
+
+  // Phase 1: pre-reserve gather staging and launch ALL gather kernels with NO per-page sync.
+  // `gather_buffers` is reserved upfront so emplace_back never reallocates and invalidates
+  // the device pointers we stash in `gather_ptrs`.
+  std::vector<rmm::device_uvector<UnsignedT>> gather_buffers;
+  gather_buffers.reserve(n);
+  std::vector<ValueT*> gather_ptrs(n, nullptr);
+  std::vector<uint32_t> gather_counts(n, 0);
+
+  for (size_t i = 0; i < n; ++i) {
+    auto const& cat = category[i];
+    gather_buffers.emplace_back(cat.num_values, stream);
+    gpuGatherSinglePageTyped<UnsignedT, encode_block_size>
+      <<<1, encode_block_size, 0, stream.value()>>>(
+        pages, cat.page_idx, gather_buffers.back().data(), nullptr);
+    gather_ptrs[i]   = reinterpret_cast<ValueT*>(gather_buffers.back().data());
+    gather_counts[i] = cat.num_values;
+  }
+
+  // Phase 2: single batched encode. Any internal sync the encoder needs to read the gather
+  // buffers will naturally drain the queued gather kernels above (same stream).
+  auto encoded = encoder.encode_pages(gather_ptrs, gather_counts, stream);
+  auto& enc_buffers = std::get<0>(encoded);
+  auto& enc_ptrs    = std::get<1>(encoded);
+  auto& enc_sizes   = std::get<2>(encoded);
+
+  // Phase 3: batched header validation -- one sync covers the whole category.
+  validate_category_headers_batched(category, enc_ptrs, enc_sizes, stream);
+
+  // Phase 4: register per-page uploads. Slot placement matches the legacy path because
+  // both paths key on `cat.page_idx`.
+  for (size_t i = 0; i < n; ++i) {
+    auto const& cat = category[i];
+    auto const sz   = enc_sizes[i];
+
+    ensure_fastlanes_page_fits_reserved_size(cat.page_idx, host_pages[cat.page_idx], sz);
+
+    upload_buffers.encoded_buffers.push_back(std::move(enc_buffers[i]));
+    upload_buffers.host_upload_ptrs[cat.page_idx]  = enc_ptrs[i];
+    upload_buffers.host_upload_sizes[cat.page_idx] = sz;
+  }
+}
 
 void run_fastlanes_cpu_encode_categorized(device_span<EncPage> pages,
                                           std::vector<EncPage> const& host_pages,
@@ -434,22 +567,30 @@ void run_fastlanes_cpu_encode_categorized(device_span<EncPage> pages,
 
   fastlanes_encoder_lazy_pool encoders;
 
-  auto encode_group = [&](std::vector<fastlanes_page_category> const& group) {
-    for (auto const& cat : group) {
-      encode_one_fastlanes_page(pages,
-                                host_pages,
-                                cat.page_idx,
-                                cat.num_values,
-                                cat.kernel_mask,
-                                encoders,
-                                upload_buffers,
-                                stream);
-    }
-  };
-
-  encode_group(categorized.raw32_pages);
-  encode_group(categorized.split64_pages);
-  encode_group(categorized.native64_pages);
+  if (!categorized.raw32_pages.empty()) {
+    encode_category_batched<int32_t>(pages,
+                                     host_pages,
+                                     categorized.raw32_pages,
+                                     encoders.get_i32(),
+                                     upload_buffers,
+                                     stream);
+  }
+  if (!categorized.split64_pages.empty()) {
+    encode_category_batched<int64_t>(pages,
+                                     host_pages,
+                                     categorized.split64_pages,
+                                     encoders.get_i64_split32(),
+                                     upload_buffers,
+                                     stream);
+  }
+  if (!categorized.native64_pages.empty()) {
+    encode_category_batched<int64_t>(pages,
+                                     host_pages,
+                                     categorized.native64_pages,
+                                     encoders.get_i64_native(),
+                                     upload_buffers,
+                                     stream);
+  }
 }
 
 // =============================================================================
