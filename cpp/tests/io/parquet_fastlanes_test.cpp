@@ -11,8 +11,10 @@
 
 #include <cuda_runtime_api.h>
 
+#include "io/parquet/fastlanes_page_encoder_path.hpp"
 #include "parquet_common.hpp"
 
+#include <cstdio>
 #include <fstream>
 #include <limits>
 #include <numeric>
@@ -2052,4 +2054,266 @@ TEST_F(ParquetCpuEncoderTest, FastLanesMixedEncodingsLowCardinalityInt32Pattern)
 
   roundtrip_with_metadata(
     input, metadata, "test_fastlanes_mixed_low_cardinality_pattern.parquet", 1024, 4096);
+}
+
+// =============================================================================
+// FL-P3-R2: A/B parity harness (test-only)
+// =============================================================================
+//
+// These tests assert that the FL-P3-R2 categorized encode path produces byte-identical
+// Parquet output to the legacy straight-line path for representative FastLanes workloads.
+// Parity is the locked invariant before FL-P3-R3 introduces batching and removes per-page
+// synchronizations; if these tests fail, FL-P3-R3 is unsafe to land.
+//
+// The harness writes the exact same input twice -- once with each path selected via a
+// thread-local override -- and compares the resulting Parquet files byte-for-byte. Because
+// Parquet metadata (`created_by`) is a compile-time constant in cudf, and per-page payloads
+// are deterministic given identical inputs, full-file byte equality is the right granularity.
+
+namespace {
+
+namespace fls_stage = cudf::io::parquet::detail::fastlanes_encode_stage;
+
+std::vector<uint8_t> read_file_bytes(std::string const& path)
+{
+  std::ifstream in(path, std::ios::binary | std::ios::ate);
+  if (!in) { throw std::runtime_error("Failed to open file for byte-read: " + path); }
+  auto const size = static_cast<std::streamsize>(in.tellg());
+  in.seekg(0, std::ios::beg);
+  std::vector<uint8_t> buffer(static_cast<size_t>(size));
+  if (size > 0 && !in.read(reinterpret_cast<char*>(buffer.data()), size)) {
+    throw std::runtime_error("Short read while loading file bytes: " + path);
+  }
+  return buffer;
+}
+
+void write_table_to_parquet(cudf::table_view const& input,
+                            cudf::io::table_input_metadata const& metadata,
+                            std::string const& filepath,
+                            size_t max_page_rows  = 1024,
+                            size_t max_page_bytes = 4096)
+{
+  auto builder = cudf::io::parquet_writer_options::builder(cudf::io::sink_info{filepath}, input)
+                   .metadata(metadata)
+                   .write_v2_headers(true);
+  if (max_page_rows > 0) { builder.max_page_size_rows(max_page_rows); }
+  if (max_page_bytes > 0) { builder.max_page_size_bytes(max_page_bytes); }
+  cudf::io::write_parquet(builder);
+}
+
+// Writes the same input twice -- once under each FastLanes encode-path selection -- and
+// asserts byte-identical Parquet output. Both files are removed at the end on success or
+// failure.
+void assert_ab_parity_byte_identical(cudf::table_view const& input,
+                                     cudf::io::table_input_metadata const& metadata,
+                                     std::string const& case_name,
+                                     size_t max_page_rows  = 1024,
+                                     size_t max_page_bytes = 4096)
+{
+  auto const path_legacy      = case_name + "_legacy.parquet";
+  auto const path_categorized = case_name + "_categorized.parquet";
+  auto cleanup                = [&]() {
+    std::remove(path_legacy.c_str());
+    std::remove(path_categorized.c_str());
+  };
+
+  try {
+    {
+      fls_stage::scoped_encode_path guard(fls_stage::fastlanes_encode_path::legacy_per_page);
+      write_table_to_parquet(input, metadata, path_legacy, max_page_rows, max_page_bytes);
+    }
+
+    {
+      fls_stage::scoped_encode_path guard(fls_stage::fastlanes_encode_path::categorized_per_page);
+      write_table_to_parquet(input, metadata, path_categorized, max_page_rows, max_page_bytes);
+    }
+
+    auto const bytes_legacy      = read_file_bytes(path_legacy);
+    auto const bytes_categorized = read_file_bytes(path_categorized);
+
+    ASSERT_EQ(bytes_legacy.size(), bytes_categorized.size())
+      << "FL-P3-R2 A/B parity: file size diverged for case '" << case_name << "'";
+    EXPECT_EQ(bytes_legacy, bytes_categorized)
+      << "FL-P3-R2 A/B parity: encoded bytes diverged for case '" << case_name << "'";
+
+    // Defense in depth: also confirm both files round-trip back to the same logical table.
+    auto reader_legacy = cudf::io::read_parquet(
+      cudf::io::parquet_reader_options::builder(cudf::io::source_info{path_legacy}));
+    auto reader_categorized = cudf::io::read_parquet(
+      cudf::io::parquet_reader_options::builder(cudf::io::source_info{path_categorized}));
+    CUDF_TEST_EXPECT_TABLES_EQUAL(input, reader_legacy.tbl->view());
+    CUDF_TEST_EXPECT_TABLES_EQUAL(input, reader_categorized.tbl->view());
+  } catch (...) {
+    cleanup();
+    throw;
+  }
+  cleanup();
+}
+
+}  // namespace
+
+TEST_F(ParquetCpuEncoderTest, FastLanesAbParityDefaultIsLegacy)
+{
+  // Guardrail: the default selection must remain legacy_per_page until FL-P3-R3 lands.
+  EXPECT_EQ(fls_stage::get_encode_path(), fls_stage::fastlanes_encode_path::legacy_per_page);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesAbParityScopedRestoresPrevious)
+{
+  using fls_stage::fastlanes_encode_path;
+  using fls_stage::scoped_encode_path;
+
+  ASSERT_EQ(fls_stage::get_encode_path(), fastlanes_encode_path::legacy_per_page);
+  {
+    scoped_encode_path guard(fastlanes_encode_path::categorized_per_page);
+    EXPECT_EQ(fls_stage::get_encode_path(), fastlanes_encode_path::categorized_per_page);
+  }
+  EXPECT_EQ(fls_stage::get_encode_path(), fastlanes_encode_path::legacy_per_page);
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesAbParityInt32SinglePage)
+{
+  std::vector<int32_t> values(2050);
+  std::iota(values.begin(), values.end(), 2);
+
+  cudf::test::fixed_width_column_wrapper<int32_t> col(values.begin(), values.end());
+  cudf::table_view input({col});
+
+  cudf::io::table_input_metadata metadata(input);
+  metadata.column_metadata[0].set_name("col0");
+  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
+
+  assert_ab_parity_byte_identical(input, metadata, "test_fastlanes_ab_parity_i32_single_page");
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesAbParityInt32MultiPageDifferentBitwidths)
+{
+  std::vector<int32_t> values(3 * 1024, 0);
+  for (int i = 0; i < 1024; ++i) { values[i] = i % 16; }
+  for (int i = 0; i < 1024; ++i) { values[1024 + i] = (1 << 20) + i; }
+  for (int i = 0; i < 1024; ++i) { values[2048 + i] = -2000 + (i % 97); }
+
+  cudf::test::fixed_width_column_wrapper<int32_t> col(values.begin(), values.end());
+  cudf::table_view input({col});
+
+  cudf::io::table_input_metadata metadata(input);
+  metadata.column_metadata[0].set_name("col0");
+  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
+
+  assert_ab_parity_byte_identical(
+    input, metadata, "test_fastlanes_ab_parity_i32_multi_page_bitwidths");
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesAbParityInt64Split64MultiPage)
+{
+  std::vector<int64_t> values(50000);
+  std::iota(values.begin(), values.end(), int64_t{4});
+
+  cudf::test::fixed_width_column_wrapper<int64_t> col(values.begin(), values.end());
+  cudf::table_view input({col});
+
+  cudf::io::table_input_metadata metadata(input);
+  metadata.column_metadata[0].set_name("col0");
+  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_SPLIT64);
+
+  assert_ab_parity_byte_identical(
+    input, metadata, "test_fastlanes_ab_parity_i64_split64_multi_page");
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesAbParityUint64Split64HighBitwidth)
+{
+  std::vector<uint64_t> values(3075);
+  for (size_t i = 0; i < values.size(); ++i) {
+    auto const ii = static_cast<uint64_t>(i + 1);
+    values[i]     = (ii << 33) ^ (0x9e3779b97f4a7c15ULL * ii);
+  }
+  values[0]                 = 0ULL;
+  values[1]                 = std::numeric_limits<uint64_t>::max();
+  values[values.size() - 1] = (uint64_t{1} << 63);
+
+  cudf::test::fixed_width_column_wrapper<uint64_t> col(values.begin(), values.end());
+  cudf::table_view input({col});
+
+  cudf::io::table_input_metadata metadata(input);
+  metadata.column_metadata[0].set_name("col0");
+  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_SPLIT64);
+
+  assert_ab_parity_byte_identical(
+    input, metadata, "test_fastlanes_ab_parity_u64_split64_high_bw");
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesAbParityMixedEncodingsWorkload)
+{
+  // Exercises the categorize-by-encoding partitioning: mixes RAW32 (INT32), SPLIT64 (INT64),
+  // and a non-FastLanes encoding (DICTIONARY). The categorized path groups by encoding mode
+  // before encoding, so byte parity here implies the per-encoding ordering does not perturb
+  // the upload-slot placement.
+  constexpr int num_rows = 4099;
+
+  std::vector<int64_t> l_orderkey(num_rows);
+  std::vector<int64_t> l_partkey(num_rows);
+  std::vector<int32_t> l_returnflag(num_rows);
+  std::vector<int32_t> l_linestatus(num_rows);
+  std::vector<cudf::timestamp_D::rep> l_shipdate(num_rows);
+
+  for (int i = 0; i < num_rows; ++i) {
+    auto const ii   = static_cast<int64_t>(i);
+    l_orderkey[i]   = (ii << 33) - (ii * 17);
+    l_partkey[i]    = ((ii % 37) == 0) ? (std::numeric_limits<int64_t>::min() + ii)
+                                       : ((ii << 28) + (ii * 97));
+    l_returnflag[i] = i % 3;
+    l_linestatus[i] = i % 2;
+    l_shipdate[i]   = 18000 + (i % 3000);
+  }
+
+  l_orderkey[0] = std::numeric_limits<int64_t>::min() + 11;
+  l_orderkey[1] = std::numeric_limits<int64_t>::max() - 13;
+  l_partkey[0]  = std::numeric_limits<int64_t>::max();
+  l_partkey[1]  = std::numeric_limits<int64_t>::min();
+
+  cudf::test::fixed_width_column_wrapper<int64_t> col_orderkey(l_orderkey.begin(),
+                                                               l_orderkey.end());
+  cudf::test::fixed_width_column_wrapper<int64_t> col_partkey(l_partkey.begin(), l_partkey.end());
+  cudf::test::fixed_width_column_wrapper<int32_t> col_returnflag(l_returnflag.begin(),
+                                                                 l_returnflag.end());
+  cudf::test::fixed_width_column_wrapper<int32_t> col_linestatus(l_linestatus.begin(),
+                                                                 l_linestatus.end());
+  cudf::test::fixed_width_column_wrapper<cudf::timestamp_D, cudf::timestamp_D::rep> col_shipdate(
+    l_shipdate.begin(), l_shipdate.end());
+
+  cudf::table_view input({col_orderkey, col_partkey, col_returnflag, col_linestatus, col_shipdate});
+
+  cudf::io::table_input_metadata metadata(input);
+  metadata.column_metadata[0].set_name("l_orderkey");
+  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_SPLIT64);
+  metadata.column_metadata[1].set_name("l_partkey");
+  metadata.column_metadata[1].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_SPLIT64);
+  metadata.column_metadata[2].set_name("l_returnflag");
+  metadata.column_metadata[2].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
+  metadata.column_metadata[3].set_name("l_linestatus");
+  metadata.column_metadata[3].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
+  metadata.column_metadata[4].set_name("l_shipdate");
+  metadata.column_metadata[4].set_encoding(cudf::io::column_encoding::DICTIONARY);
+
+  assert_ab_parity_byte_identical(input, metadata, "test_fastlanes_ab_parity_mixed_workload");
+}
+
+TEST_F(ParquetCpuEncoderTest, FastLanesAbParityInt8TinyTailPages)
+{
+  // Stresses tail-page handling under the categorized path; verifies the categorize loop
+  // skips empty pages exactly like the legacy loop does.
+  std::vector<int8_t> values(4099);
+  for (size_t i = 0; i < values.size(); ++i) {
+    values[i] = static_cast<int8_t>((i % 127) - 63);
+  }
+
+  cudf::test::fixed_width_column_wrapper<int8_t> col(values.begin(), values.end());
+  cudf::table_view input({col});
+
+  cudf::io::table_input_metadata metadata(input);
+  metadata.column_metadata[0].set_name("col0");
+  metadata.column_metadata[0].set_encoding(cudf::io::column_encoding::FASTLANE_BITPACK_RAW);
+
+  assert_ab_parity_byte_identical(
+    input, metadata, "test_fastlanes_ab_parity_i8_tiny_tail");
 }

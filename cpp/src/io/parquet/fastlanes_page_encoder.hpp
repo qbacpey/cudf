@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "fastlanes_page_encoder_path.hpp"
 #include "fastlanes_parquet_common.cuh"
 
 namespace cudf::io::parquet::detail::fastlanes_encode_stage {

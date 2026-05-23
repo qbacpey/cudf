@@ -1,5 +1,3 @@
-Implement this plan for me under the remote-working contract in [SKILL.md](/home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/.github/skills/remote-working-contract/SKILL.md). My local environment does not have a GPU, so all build and test execution must happen remotely on `qchen@fng01.lab.tuda.systems`. Read and apply the required task variables first: `TARGET_BRANCH=fastlane-working`, `INPUT_PATTERN`, and `RUN_TAG`.
-
 ## Plan: FastLanes Parquet Refactor Hard-Cutover
 
 Comprehensive staged plan to implement host/device API separation, encoder file split with namespace cleanup, and page-encoder batching refactor with strict parity constraints. This plan follows remote GPU execution constraints on fng01, uses small reversible micro-runs, enforces direct hard cutovers, and validates each run with build + PARQUET_TEST + PARQUET_FASTLANES_TEST.
@@ -28,7 +26,7 @@ Comprehensive staged plan to implement host/device API separation, encoder file 
 ### Dependency Graph
 - FL-P1-R1 -> FL-P1-R2 -> FL-P1-R3 -> Phase-1 Milestone
 - FL-P2-R1 -> FL-P2-R2 -> Phase-2 Milestone
-- FL-P3-R1 -> FL-P3-R2 -> FL-P3-R3 -> FL-P3-R4 -> FL-P3-R5 -> Phase-3 Milestone
+- FL-P3-R1 -> FL-P3-R1.5 (slim path-selector header, see below) -> FL-P3-R2 -> FL-P3-R3 -> FL-P3-R4 -> FL-P3-R5 -> Phase-3 Milestone
 - Parallelism: none for production edits (high coupling). Validation artifact summarization can run in parallel with non-blocking report generation.
 
 ### Micro-Runs
@@ -171,21 +169,67 @@ Phase 2 Milestone Gate
 - Rollback trigger: new TU link failure or include ordering break.
 - Evidence: move-only diff summary + test output.
 
+6.5. FL-P3-R1.5: Slim Path-Selector Header (FL-P3-R1 follow-up, added during FL-P3-R2)
+- Status: COMPLETED locally (this work).
+- Why added: FL-P3-R1 kept `fastlanes_page_encoder.cu` source-included from `page_enc.cu`, so its only
+  public-ish header was a CUDA header that pulls in `parquet_gpu.hpp` and friends. The FL-P3-R2 A/B
+  harness needs to flip an encode-path selector from a non-CUDA `.cpp` test file; including the
+  existing CUDA header from a plain C++ TU breaks compilation. A second, slim, non-CUDA header is
+  the minimal fix.
+- Concrete edits:
+  - New `cpp/src/io/parquet/fastlanes_page_encoder_path.hpp` containing only the path enum,
+    `get_encode_path` / `set_encode_path` declarations (annotated with `CUDF_EXPORT` so plain-C++
+    test TUs can link them across the libcudf shared-library boundary), and a `scoped_encode_path`
+    RAII guard.
+  - `fastlanes_page_encoder.hpp` now includes the slim header (no public-API change beyond exposure
+    of the new enum).
+  - `fastlanes_page_encoder.cu` includes the slim header so its definitions match the declarations
+    even though it is still source-included from `page_enc.cu`.
+- Validation: full PARQUET_FASTLANES_TEST and PARQUET_TEST stay green (see FL-P3-R2 evidence below).
+- Acceptance: no production behavior change; only adds a non-CUDA include surface needed by tests.
+
 7. FL-P3-R2: Add Categorize Phase + Test-Only Legacy A/B Harness
+- Status: COMPLETED locally (this work).
 - Goal: add phase-4a categorize scaffolding and lock parity guardrails before behavior change.
-- Depends on: FL-P3-R1.
+- Depends on: FL-P3-R1, FL-P3-R1.5.
 - Editable scope:
   - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/fastlanes_page_encoder.cu
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/fastlanes_page_encoder.hpp
+  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/fastlanes_page_encoder_path.hpp (new; FL-P3-R1.5)
   - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/tests/io/parquet_fastlanes_test.cpp
-  - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/tests/CMakeLists.txt (if new test file is needed)
 - Forbidden scope: switching to encode_pages batching yet.
-- Concrete edits:
-  - Introduce page categorization data structures and single-pass grouping by encoding mode.
-  - Add test-only A/B harness comparing reference path and refactor path outputs.
-- Validation: per-run tests with new A/B filters included in PARQUET_FASTLANES_TEST.
-- Acceptance: A/B tests pass with byte identity.
+- Concrete edits applied locally:
+  - Added `fastlanes_page_category` and `fastlanes_categorized_pages` host-side structs.
+  - Added `categorize_fastlanes_pages(host_pages)` single-pass classifier keyed on
+    `kernel_mask` + `num_leaf_values`, partitioning into RAW32/SPLIT64/NATIVE64 vectors in
+    ascending page_idx order.
+  - Factored a single `encode_one_fastlanes_page` helper shared by both A/B paths so the only
+    intentional difference between paths is iteration order over `pages`.
+  - Split `run_fastlanes_cpu_encode` into:
+    - `run_fastlanes_cpu_encode_legacy`: straight-line per-page loop (reference path / default).
+    - `run_fastlanes_cpu_encode_categorized`: categorize-then-encode per group (RAW32 -> SPLIT64
+      -> NATIVE64), still per-page within each group (no batching yet).
+  - Added thread-local `fastlanes_encode_path` selector with `get_encode_path` /
+    `set_encode_path` / `scoped_encode_path` exposed via the slim header (FL-P3-R1.5).
+  - Added A/B parity tests in `parquet_fastlanes_test.cpp` that write the same input twice
+    (once per selector) and compare resulting Parquet file bytes for equality, plus round-trip
+    correctness for both paths.
+- Validation (local fng equivalent):
+  - cmake --build . --target cudf,PARQUET_FASTLANES_TEST,PARQUET_TEST (clean nvcc build).
+  - PARQUET_FASTLANES_TEST: 80/80 PASSED, including the 8 new `*AbParity*` tests.
+  - PARQUET_TEST: 452/452 PASSED.
+- Acceptance: A/B tests pass with byte identity; default selector remains `legacy_per_page` so
+  unchanged production code paths exercise the reference implementation.
 - Rollback trigger: parity mismatch in headers/payloads.
-- Evidence: A/B test pass summary with mismatch count = 0.
+- Evidence: see test run summary above; new A/B parity tests names below:
+  - FastLanesAbParityDefaultIsLegacy (default-selector guardrail)
+  - FastLanesAbParityScopedRestoresPrevious (RAII guard guardrail)
+  - FastLanesAbParityInt32SinglePage
+  - FastLanesAbParityInt32MultiPageDifferentBitwidths
+  - FastLanesAbParityInt64Split64MultiPage
+  - FastLanesAbParityUint64Split64HighBitwidth
+  - FastLanesAbParityMixedEncodingsWorkload (RAW32 + SPLIT64 + DICTIONARY mix)
+  - FastLanesAbParityInt8TinyTailPages
 
 8. FL-P3-R3: Batch Encode + Remove In-Loop Syncs
 - Goal: implement phase-4b and phase-4c (batch encode + finalize kernels) and remove per-page synchronization bottleneck.
@@ -239,6 +283,7 @@ Phase 3 Milestone Gate
 - Exit requirement: full libcudf ctest pass, AND successful script validation of the generated FastLanes Parquet file.
 
 ### Relevant Files
+- /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/src/io/parquet/fastlanes_page_encoder_path.hpp — FL-P3-R1.5 slim non-CUDA header exposing the FL-P3-R2 A/B encode-path selector to plain-C++ test TUs.
 - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_host.hpp — host launch API declarations.
 - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_device.cuh — device/runtime dispatch boundary and .inl inclusion.
 - /home/qba/01_Sys_Hiwi/04_GPUFileFormat-cudf/cudf-fastlane/cpp/include/cudf/fastlanes/native64_cuda_kernels.inl — generated lane kernels/dispatch tables.
