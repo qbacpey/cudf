@@ -29,6 +29,7 @@
 #include <src/io/parquet/stats_filter_helpers.hpp>
 
 #include <array>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -4654,4 +4655,205 @@ TEST_F(ParquetReaderTest, DecodeVariableWidthDecimalStats)
             -500);
   EXPECT_THROW(ParquetStatsDecoder::decode<int32_t>({0xff, 0xff, 0xff, 0xfe, 0x0c}),
                cudf::logic_error);
+}
+
+namespace {
+[[nodiscard]] std::string write_named_parquet(cudf::table_view const& tbl,
+                                              std::vector<std::string> const& names,
+                                              std::string const& label)
+{
+  cudf::io::table_input_metadata md{tbl};
+  for (std::size_t i = 0; i < names.size(); ++i) {
+    md.column_metadata[i].set_name(names[i]);
+  }
+  auto const path = temp_env->get_temp_filepath(label);
+  cudf::io::parquet_writer_options opts =
+    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{path}, tbl).metadata(std::move(md));
+  cudf::io::write_parquet(opts);
+  return path;
+}
+}  // namespace
+
+// TEMP probe (#22822): print exception type + message for mismatched-schema validation scenarios.
+// `A*` files are source 0, `B*` files are source 1. `ignore_missing_columns` is set explicitly.
+TEST_F(ParquetReaderTest, MismatchedSchemaValidationProbe)
+{
+  auto const probe = [](std::string const& label, auto&& read_fn) {
+    try {
+      auto const result = read_fn();
+      std::cout << "PROBE| " << label << " | NO THROW | rows=" << result.tbl->num_rows()
+                << " cols=" << result.tbl->num_columns() << "\n";
+    } catch (std::out_of_range const& e) {
+      std::cout << "PROBE| " << label << " | std::out_of_range | " << e.what() << "\n";
+    } catch (std::invalid_argument const& e) {
+      std::cout << "PROBE| " << label << " | std::invalid_argument | " << e.what() << "\n";
+    } catch (cudf::logic_error const& e) {
+      std::cout << "PROBE| " << label << " | cudf::logic_error | " << e.what() << "\n";
+    } catch (std::exception const& e) {
+      std::cout << "PROBE| " << label << " | std::exception | " << e.what() << "\n";
+    }
+  };
+
+  using i64 = column_wrapper<int64_t>;
+  using f64 = column_wrapper<double>;
+
+  // C0 (control): filter-only column present in all (mismatched) sources -> valid, correct result.
+  // B has an extra trailing `qty` so the schemas differ but `price`'s position is unchanged.
+  probe("C0 filteronly-valid-allsrc ignore=true", [&] {
+    auto const id_a    = i64{1, 2, 3};
+    auto const price_a = f64{10., 200., 30.};
+    auto const path_a =
+      write_named_parquet(cudf::table_view{{id_a, price_a}}, {"id", "price"}, "ProbeC0A.parquet");
+    auto const id_b    = i64{1000, 1001, 1002};
+    auto const price_b = f64{40., 500., 60.};
+    auto const qty_b   = i64{7, 8, 9};
+    auto const path_b  = write_named_parquet(
+      cudf::table_view{{id_b, price_b, qty_b}}, {"id", "price", "qty"}, "ProbeC0B.parquet");
+    auto value  = cudf::numeric_scalar<double>(100.0);
+    auto lit    = cudf::ast::literal(value);
+    auto col    = cudf::ast::column_name_reference("price");
+    auto filter = cudf::ast::operation(cudf::ast::ast_operator::LESS, col, lit);
+    return cudf::io::read_parquet(
+      cudf::io::parquet_reader_options::builder(cudf::io::source_info{{path_a, path_b}})
+        .allow_mismatched_pq_schemas(true)
+        .ignore_missing_columns(true)
+        .column_names({"id"})
+        .filter(filter)
+        .build());
+  });
+
+  // S1: selected (non-filter) column absent from source 0; ignore_missing = true
+  probe("S1 sel-missing-src0 ignore=true", [&] {
+    auto const id_a    = i64{1, 2, 3};
+    auto const path_a  = write_named_parquet(cudf::table_view{{id_a}}, {"id"}, "ProbeS1A.parquet");
+    auto const id_b    = i64{4, 5, 6};
+    auto const price_b = f64{10., 20., 30.};
+    auto const path_b =
+      write_named_parquet(cudf::table_view{{id_b, price_b}}, {"id", "price"}, "ProbeS1B.parquet");
+    return cudf::io::read_parquet(
+      cudf::io::parquet_reader_options::builder(cudf::io::source_info{{path_a, path_b}})
+        .allow_mismatched_pq_schemas(true)
+        .ignore_missing_columns(true)
+        .column_names({"id", "price"})
+        .build());
+  });
+
+  // S2: selected column absent from source 0; ignore_missing = false
+  probe("S2 sel-missing-src0 ignore=false", [&] {
+    auto const id_a    = i64{1, 2, 3};
+    auto const path_a  = write_named_parquet(cudf::table_view{{id_a}}, {"id"}, "ProbeS2A.parquet");
+    auto const id_b    = i64{4, 5, 6};
+    auto const price_b = f64{10., 20., 30.};
+    auto const path_b =
+      write_named_parquet(cudf::table_view{{id_b, price_b}}, {"id", "price"}, "ProbeS2B.parquet");
+    return cudf::io::read_parquet(
+      cudf::io::parquet_reader_options::builder(cudf::io::source_info{{path_a, path_b}})
+        .allow_mismatched_pq_schemas(true)
+        .ignore_missing_columns(false)
+        .column_names({"id", "price"})
+        .build());
+  });
+
+  // S3: selected column present in source 0 but absent from source 1; ignore_missing = true
+  probe("S3 sel-missing-src1 ignore=true", [&] {
+    auto const id_a    = i64{1, 2, 3};
+    auto const price_a = f64{10., 20., 30.};
+    auto const path_a =
+      write_named_parquet(cudf::table_view{{id_a, price_a}}, {"id", "price"}, "ProbeS3A.parquet");
+    auto const id_b   = i64{4, 5, 6};
+    auto const path_b = write_named_parquet(cudf::table_view{{id_b}}, {"id"}, "ProbeS3B.parquet");
+    return cudf::io::read_parquet(
+      cudf::io::parquet_reader_options::builder(cudf::io::source_info{{path_a, path_b}})
+        .allow_mismatched_pq_schemas(true)
+        .ignore_missing_columns(true)
+        .column_names({"id", "price"})
+        .build());
+  });
+
+  // S4: filter-only column absent from source 0; ignore_missing = true
+  probe("S4 filteronly-missing-src0 ignore=true", [&] {
+    auto const id_a    = i64{1, 2, 3};
+    auto const path_a  = write_named_parquet(cudf::table_view{{id_a}}, {"id"}, "ProbeS4A.parquet");
+    auto const id_b    = i64{4, 5, 6};
+    auto const price_b = f64{10., 20., 30.};
+    auto const path_b =
+      write_named_parquet(cudf::table_view{{id_b, price_b}}, {"id", "price"}, "ProbeS4B.parquet");
+    auto value        = cudf::numeric_scalar<double>(100.0);
+    auto lit          = cudf::ast::literal(value);
+    auto col          = cudf::ast::column_name_reference("price");
+    auto filter       = cudf::ast::operation(cudf::ast::ast_operator::LESS, col, lit);
+    return cudf::io::read_parquet(
+      cudf::io::parquet_reader_options::builder(cudf::io::source_info{{path_a, path_b}})
+        .allow_mismatched_pq_schemas(true)
+        .ignore_missing_columns(true)
+        .column_names({"id"})
+        .filter(filter)
+        .build());
+  });
+
+  // S5: filter-only column absent from source 0; ignore_missing = false
+  probe("S5 filteronly-missing-src0 ignore=false", [&] {
+    auto const id_a    = i64{1, 2, 3};
+    auto const path_a  = write_named_parquet(cudf::table_view{{id_a}}, {"id"}, "ProbeS5A.parquet");
+    auto const id_b    = i64{4, 5, 6};
+    auto const price_b = f64{10., 20., 30.};
+    auto const path_b =
+      write_named_parquet(cudf::table_view{{id_b, price_b}}, {"id", "price"}, "ProbeS5B.parquet");
+    auto value        = cudf::numeric_scalar<double>(100.0);
+    auto lit          = cudf::ast::literal(value);
+    auto col          = cudf::ast::column_name_reference("price");
+    auto filter       = cudf::ast::operation(cudf::ast::ast_operator::LESS, col, lit);
+    return cudf::io::read_parquet(
+      cudf::io::parquet_reader_options::builder(cudf::io::source_info{{path_a, path_b}})
+        .allow_mismatched_pq_schemas(true)
+        .ignore_missing_columns(false)
+        .column_names({"id"})
+        .filter(filter)
+        .build());
+  });
+
+  // S6: filter-only column present in source 0 but absent from source 1 (key: proves the filter
+  // set is unioned into the selection and validated per source); ignore_missing = true
+  probe("S6 filteronly-missing-src1 ignore=true", [&] {
+    auto const id_a    = i64{1, 2, 3};
+    auto const price_a = f64{10., 20., 30.};
+    auto const path_a =
+      write_named_parquet(cudf::table_view{{id_a, price_a}}, {"id", "price"}, "ProbeS6A.parquet");
+    auto const id_b   = i64{4, 5, 6};
+    auto const path_b = write_named_parquet(cudf::table_view{{id_b}}, {"id"}, "ProbeS6B.parquet");
+    auto value        = cudf::numeric_scalar<double>(100.0);
+    auto lit          = cudf::ast::literal(value);
+    auto col          = cudf::ast::column_name_reference("price");
+    auto filter       = cudf::ast::operation(cudf::ast::ast_operator::LESS, col, lit);
+    return cudf::io::read_parquet(
+      cudf::io::parquet_reader_options::builder(cudf::io::source_info{{path_a, path_b}})
+        .allow_mismatched_pq_schemas(true)
+        .ignore_missing_columns(true)
+        .column_names({"id"})
+        .filter(filter)
+        .build());
+  });
+
+  // S7: column present in all sources but with a different type (double vs int64)
+  probe("S7 type-mismatch-allsrc ignore=true", [&] {
+    auto const id_a    = i64{1, 2, 3};
+    auto const price_a = f64{10., 20., 30.};
+    auto const path_a =
+      write_named_parquet(cudf::table_view{{id_a, price_a}}, {"id", "price"}, "ProbeS7A.parquet");
+    auto const id_b    = i64{4, 5, 6};
+    auto const price_b = i64{40, 50, 60};
+    auto const path_b =
+      write_named_parquet(cudf::table_view{{id_b, price_b}}, {"id", "price"}, "ProbeS7B.parquet");
+    auto value        = cudf::numeric_scalar<double>(100.0);
+    auto lit          = cudf::ast::literal(value);
+    auto col          = cudf::ast::column_name_reference("price");
+    auto filter       = cudf::ast::operation(cudf::ast::ast_operator::LESS, col, lit);
+    return cudf::io::read_parquet(
+      cudf::io::parquet_reader_options::builder(cudf::io::source_info{{path_a, path_b}})
+        .allow_mismatched_pq_schemas(true)
+        .ignore_missing_columns(true)
+        .column_names({"id", "price"})
+        .filter(filter)
+        .build());
+  });
 }
