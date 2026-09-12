@@ -271,6 +271,14 @@ ConfigureNVBench(
 )
 
 # ##################################################################################################
+# * hybrid scan metadata benchmark
+# ----------------------------------------------------------------------
+ConfigureNVBench(
+  HYBRID_SCAN_METADATA_NVBENCH io/parquet/experimental/hybrid_scan/hybrid_scan_metadata.cpp
+  io/parquet/reader_common.cpp
+)
+
+# ##################################################################################################
 # * interop benchmark ------------------------------------------------------------------------------
 ConfigureNVBench(INTEROP_NVBENCH interop/interop.cpp interop/interop_stringview.cpp)
 target_link_libraries(INTEROP_NVBENCH PRIVATE nanoarrow::nanoarrow)
