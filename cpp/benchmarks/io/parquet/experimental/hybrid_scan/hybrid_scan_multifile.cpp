@@ -24,6 +24,7 @@
 #include <nvbench/nvbench.cuh>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -124,16 +125,110 @@ cudf::io::parquet_reader_options make_read_opts(cudf::io::source_info const& sou
 }
 
 // -----------------------------------------------------------------------------------------------
+// Release mode (CUDF_BENCH_RELEASE_MODE=1).
+//
+// Reads in memory-bounded passes and materializes each pass in bounded output chunks, counting
+// rows and releasing each chunk immediately. Peak device memory is bounded by the limits below
+// instead of the dataset size, so scale factors whose decoded output exceeds GPU memory
+// (SF1K ~= 190 GB, SF3K ~= 575 GB for NARROW) still run on a single smaller GPU.
+//
+// Two bounds, both implemented by the reader's native chunked-read APIs:
+//  - pass_read_limit  bounds one fetch+decompress pass   (construct_row_group_passes)
+//  - chunk_read_limit bounds one materialized output chunk (setup_chunking_for_all_columns)
+//
+// Applied to all three arms equally and only to the ALL phase. Caveats to disclose when
+// reporting: the single-file arms skip the final concatenate, and MULTIFILE issues one fetch
+// round per pass instead of a single fully-coalesced fetch. Both differences disfavor the
+// multifile arm slightly, i.e. release-mode speedups are conservative for the multifile thesis.
+// -----------------------------------------------------------------------------------------------
+
+bool release_mode_enabled()
+{
+  auto const* v = std::getenv("CUDF_BENCH_RELEASE_MODE");
+  return v != nullptr && std::string{v} == "1";
+}
+
+std::size_t env_size(char const* name, std::size_t fallback)
+{
+  auto const* v = std::getenv(name);
+  return v != nullptr ? std::stoull(v) : fallback;
+}
+
+// MULTIFILE has one pass in flight at a time, so it can afford large passes (better coalescing).
+std::size_t mf_pass_read_limit()
+{
+  return env_size("CUDF_BENCH_MF_PASS_BYTES", std::size_t{8} << 30);  // 8 GiB
+}
+std::size_t mf_chunk_read_limit()
+{
+  return env_size("CUDF_BENCH_MF_CHUNK_BYTES", std::size_t{1} << 30);  // 1 GiB
+}
+// SINGLE_* arms have up to num_threads readers in flight concurrently; per-reader budget must
+// leave room for all of them (24 threads x ~1.3 GiB ~= 31 GiB with these defaults).
+std::size_t sf_pass_read_limit()
+{
+  return env_size("CUDF_BENCH_SF_PASS_BYTES", std::size_t{512} << 20);  // 512 MiB
+}
+std::size_t sf_chunk_read_limit()
+{
+  return env_size("CUDF_BENCH_SF_CHUNK_BYTES", std::size_t{256} << 20);  // 256 MiB
+}
+
+// -----------------------------------------------------------------------------------------------
 // MULTIFILE arm: one reader spanning all sources.
 // -----------------------------------------------------------------------------------------------
+
+// Release-mode MULTIFILE path. One pass in flight: fetch only that pass's compressed bytes,
+// decode it in bounded chunks, count rows, release everything before the next pass.
+// A fresh reader per pass keeps the one-shot chunking setup state clean; construction from
+// host-resident footers is negligible next to device work.
+template <typename Timer>
+std::size_t run_multifile_release(Timer& timer,
+                                  cudf::io::source_info const& source_info,
+                                  bool narrow,
+                                  cuda::stream_ref stream,
+                                  rmm::device_async_resource_ref mr)
+{
+  auto inputs = multifile_bench_inputs(source_info);
+  auto opts   = make_read_opts(source_info, narrow);
+
+  timer.start();  // footer + planning are part of the end-to-end measurement
+  auto reader           = exp::hybrid_scan_multifile{inputs.footer_byte_spans, opts};
+  auto const row_groups = reader.all_row_groups(opts);
+  auto const passes     = reader.construct_row_group_passes(row_groups, mf_pass_read_limit());
+
+  std::size_t total = 0;
+  for (auto const& pass_rgs : passes) {
+    auto data = fetch_multisource_device_data(
+      inputs, reader.all_column_chunks_byte_ranges(pass_rgs, opts), stream, mr);
+    data.io_future.get();
+    auto pass_reader = exp::hybrid_scan_multifile{inputs.footer_byte_spans, opts};
+    pass_reader.setup_chunking_for_all_columns(
+      mf_chunk_read_limit(), mf_pass_read_limit(), pass_rgs, data.flat_spans, opts, stream, mr);
+    while (pass_reader.has_next_table_chunk()) {
+      total += pass_reader.materialize_all_columns_chunk().tbl->num_rows();
+    }
+  }
+  stream.sync();
+  timer.stop();
+  return total;
+}
+
 template <read_phase Phase, typename Timer>
 std::unique_ptr<cudf::table> run_multifile(Timer& timer,
                                            cudf::io::source_info const& source_info,
                                            bool narrow,
                                            cuda::stream_ref stream,
-                                           rmm::device_async_resource_ref mr)
+                                           rmm::device_async_resource_ref mr,
+                                           bool release,
+                                           std::size_t& rows_out)
 {
   constexpr auto all = Phase == read_phase::ALL;
+
+  if (release) {
+    if constexpr (all) { rows_out = run_multifile_release(timer, source_info, narrow, stream, mr); }
+    return nullptr;  // release mode supports ALL only; the caller skips other phases
+  }
 
   if constexpr (Phase == read_phase::FOOTER or all) { timer.start(); }
   auto inputs = multifile_bench_inputs(source_info);
@@ -183,6 +278,38 @@ std::unique_ptr<cudf::table> read_one_file(cudf::io::datasource& datasource,
   return tbl;
 }
 
+// Release-mode single-file body: same read path as read_one_file, but per memory-bounded pass
+// with chunked materialization; rows are counted and released instead of retained.
+std::size_t read_one_file_release(cudf::io::datasource& datasource,
+                                  cudf::io::parquet_reader_options const& opts,
+                                  cuda::stream_ref stream,
+                                  rmm::device_async_resource_ref mr)
+{
+  auto const footer = io_parquet::fetch_footer_to_host(datasource);
+  auto reader       = exp::hybrid_scan_reader{*footer, opts};
+  auto const passes = reader.construct_row_group_passes(reader.all_row_groups(opts),
+                                                        sf_pass_read_limit());
+
+  std::size_t total = 0;
+  for (auto const& pass : passes) {
+    auto pass_reader = exp::hybrid_scan_reader{*footer, opts};
+    auto [buf, spans, tasks] = io_parquet::fetch_byte_ranges_to_device_async(
+      datasource,
+      pass_reader.all_column_chunks_byte_ranges(pass, opts),
+      io_parquet::io_submission_policy::SERIALIZE,
+      stream,
+      mr);
+    tasks.get();
+    pass_reader.setup_chunking_for_all_columns(
+      sf_chunk_read_limit(), sf_pass_read_limit(), pass, spans, opts, stream, mr);
+    while (pass_reader.has_next_table_chunk()) {
+      total += pass_reader.materialize_all_columns_chunk().tbl->num_rows();
+    }
+  }
+  stream.sync();
+  return total;
+}
+
 // -----------------------------------------------------------------------------------------------
 // SINGLE_SEQ arm: drive the per-file readers one after another on a single stream.
 // -----------------------------------------------------------------------------------------------
@@ -191,7 +318,9 @@ std::unique_ptr<cudf::table> run_single_seq(Timer& timer,
                                             cudf::io::source_info const& source_info,
                                             bool narrow,
                                             cuda::stream_ref stream,
-                                            rmm::device_async_resource_ref mr)
+                                            rmm::device_async_resource_ref mr,
+                                            bool release,
+                                            std::size_t& rows_out)
 {
   auto datasources = cudf::io::make_datasources(source_info);
   auto opts        = make_read_opts(source_info, narrow);
@@ -261,6 +390,14 @@ std::unique_ptr<cudf::table> run_single_seq(Timer& timer,
     return out;
   } else {  // ALL
     timer.start();
+    if (release) {
+      std::size_t total = 0;
+      for (auto& ds : datasources) { total += read_one_file_release(*ds, opts, stream, mr); }
+      stream.sync();
+      timer.stop();
+      rows_out = total;
+      return nullptr;
+    }
     for (auto& ds : datasources) {
       parts.push_back(read_one_file(*ds, opts, stream, mr));
     }
@@ -280,7 +417,9 @@ std::unique_ptr<cudf::table> run_single_pool(Timer& timer,
                                              bool narrow,
                                              int64_t num_threads,
                                              cuda::stream_ref stream,
-                                             rmm::device_async_resource_ref mr)
+                                             rmm::device_async_resource_ref mr,
+                                             bool release,
+                                             std::size_t& rows_out)
 {
   auto datasources = cudf::io::make_datasources(source_info);
   auto opts        = make_read_opts(source_info, narrow);
@@ -294,6 +433,18 @@ std::unique_ptr<cudf::table> run_single_pool(Timer& timer,
   // The pooled arm is only meaningfully timed end to end; sub-phase timing of a threaded loop is
   // not comparable to the sequential breakdown, so non-ALL phases fall back to timing ALL.
   timer.start();
+  if (release) {
+    std::atomic<std::size_t> total{0};
+    pool.detach_sequence(int64_t{0}, n, [&](int64_t i) {
+      auto const s = streams[i % num_threads];
+      total += read_one_file_release(*datasources[i], opts, s, mr);
+    });
+    pool.wait();
+    cudf::detail::join_streams(streams, cudf::get_default_stream());
+    timer.stop();
+    rows_out = total.load();
+    return nullptr;
+  }
   pool.detach_sequence(int64_t{0}, n, [&](int64_t i) {
     auto const s = streams[i % num_threads];
     parts[i]     = read_one_file(*datasources[i], opts, s, mr);
@@ -325,6 +476,14 @@ void BM_hybrid_scan_multifile(nvbench::state& state,
     }
   }
 
+  // Release mode (bounded memory) is an end-to-end mode: the sub-phase arms still buffer whole
+  // files, so only ALL is meaningful (and safe) under it.
+  auto const release = release_mode_enabled();
+  if (release && Phase != read_phase::ALL) {
+    state.skip("release mode times the ALL phase only");
+    return;
+  }
+
   auto const files       = find_tpch_files(num_files);
   auto const source_info = cudf::io::source_info(files);
 
@@ -342,13 +501,16 @@ void BM_hybrid_scan_multifile(nvbench::state& state,
 
                auto const wall_start = std::chrono::steady_clock::now();
                std::unique_ptr<cudf::table> result;
+               std::size_t rows_from_release = 0;
                if constexpr (Api == read_api::MULTIFILE) {
-                 result = run_multifile<Phase>(timer, source_info, narrow, stream, mr);
+                 result = run_multifile<Phase>(
+                   timer, source_info, narrow, stream, mr, release, rows_from_release);
                } else if constexpr (Api == read_api::SINGLE_SEQ) {
-                 result = run_single_seq<Phase>(timer, source_info, narrow, stream, mr);
+                 result = run_single_seq<Phase>(
+                   timer, source_info, narrow, stream, mr, release, rows_from_release);
                } else {
                  result = run_single_pool<Phase>(
-                   timer, source_info, narrow, num_threads, stream, mr);
+                   timer, source_info, narrow, num_threads, stream, mr, release, rows_from_release);
                }
                // Block until every async read and kernel has fully completed before reading the
                // wall clock, so off-stream kvikio I/O is included.
@@ -356,12 +518,15 @@ void BM_hybrid_scan_multifile(nvbench::state& state,
                auto const wall_stop = std::chrono::steady_clock::now();
                wall_seconds = std::chrono::duration<double>(wall_stop - wall_start).count();
                if (result) { total_rows = result->num_rows(); }
+               if (release) { total_rows = rows_from_release; }
              });
 
   auto const time = state.get_summary("nv/cold/time/gpu/mean").get_float64("value");
   state.add_element_count(static_cast<double>(total_rows) / time, "rows_per_sec");
   // Throughput on the honest wall-clock metric.
   state.add_element_count(static_cast<double>(total_rows) / wall_seconds, "rows_per_sec_wall");
+  // Exact row count actually read, so release mode can be validated against full mode.
+  state.add_element_count(static_cast<double>(total_rows), "total_rows");
   state.add_buffer_size(
     mem_stats_logger.peak_memory_usage(), "peak_memory_usage", "peak_memory_usage");
 }
