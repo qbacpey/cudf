@@ -287,6 +287,14 @@ ConfigureNVBench(
 )
 
 # ##################################################################################################
+# * hybrid scan multifile benchmark
+# ----------------------------------------------------------------------
+ConfigureNVBench(
+  HYBRID_SCAN_MULTIFILE_NVBENCH io/parquet/experimental/hybrid_scan/hybrid_scan_multifile.cpp
+  io/parquet/experimental/hybrid_scan/multifile_bench_common.cpp
+)
+
+# ##################################################################################################
 # * interop benchmark ------------------------------------------------------------------------------
 ConfigureNVBench(INTEROP_NVBENCH interop/interop.cpp interop/interop_stringview.cpp)
 target_link_libraries(INTEROP_NVBENCH PRIVATE nanoarrow::nanoarrow)
