@@ -83,5 +83,28 @@ target_link_libraries(
 target_compile_features(fastlane_int64_cpu_roundtrip PRIVATE cxx_std_20)
 install(TARGETS fastlane_int64_cpu_roundtrip DESTINATION bin/examples/libcudf/parquet_io)
 
+# Build and install fastlanes_encoding_bench
+add_executable(fastlanes_encoding_bench fastlanes_encoding_bench.cpp)
+target_link_libraries(
+  fastlanes_encoding_bench PRIVATE cudf::cudf $<BUILD_LOCAL_INTERFACE:nvtx3::nvtx3-cpp>
+                                   $<TARGET_OBJECTS:parquet_io_utils>
+)
+target_compile_features(fastlanes_encoding_bench PRIVATE cxx_std_20)
+install(TARGETS fastlanes_encoding_bench DESTINATION bin/examples/libcudf/parquet_io)
+
+# FastLanes write/read sanity programs that only use the public libcudf API
+foreach(target fastlane_multi_page_sanity_test fastlane_multi_column_test)
+  add_executable(${target} ${target}.cpp)
+  target_link_libraries(${target} PRIVATE cudf::cudf)
+  target_compile_features(${target} PRIVATE cxx_std_20)
+endforeach()
+
+# FastLanes sanity programs that also call the generated CPU pack kernels directly
+foreach(target fastlane_one_page_sanity_test fastlane_encode_verify_test)
+  add_executable(${target} ${target}.cpp ../../src/fastlanes/pack.cpp)
+  target_link_libraries(${target} PRIVATE cudf::cudf)
+  target_compile_features(${target} PRIVATE cxx_std_20)
+endforeach()
+
 # Install the example.parquet file
 install(FILES ${CMAKE_CURRENT_LIST_DIR}/example.parquet DESTINATION bin/examples/libcudf/parquet_io)

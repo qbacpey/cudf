@@ -171,6 +171,15 @@ def _is_fastlanes_eligible_int32(col: ColumnInfo) -> bool:
     return "Int(bitWidth=32" in col.logical_type
 
 
+def _is_fastlanes_eligible_int64(col: ColumnInfo) -> bool:
+    """INT64 columns without a decimal/temporal annotation map to FASTLANES_DELTA_BINARY."""
+    if col.physical_type != "INT64" or _is_decimal_like(col):
+        return False
+    if col.converted_type in {"NONE", "INT_64", "UINT_64"} and col.logical_type in {"None", ""}:
+        return True
+    return "Int(bitWidth=64" in col.logical_type.replace(" ", "")
+
+
 def _is_date32_like(col: ColumnInfo) -> bool:
     return col.converted_type == "DATE" or "Date" in col.logical_type
 
@@ -207,6 +216,8 @@ def _candidate_encodings(col: ColumnInfo, allow_future_fastlanes: bool = False) 
     if col.physical_type == "INT64":
         if _is_decimal_like(col):
             return ["DICTIONARY", "DELTA_BINARY_PACKED"]
+        if _is_fastlanes_eligible_int64(col):
+            return ["DELTA_BINARY_PACKED", "FASTLANES_DELTA_BINARY", "DICTIONARY"]
         return ["DELTA_BINARY_PACKED", "DICTIONARY"]
     if col.physical_type in {"BYTE_ARRAY", "FIXED_LEN_BYTE_ARRAY"}:
         return ["DICTIONARY", "DELTA_BYTE_ARRAY"]
@@ -236,6 +247,7 @@ def _run_chunk_rewrite(
     batch_size: int,
     skip_validation: bool,
     show_chunk_logs: bool,
+    max_page_rows: int = 0,
 ) -> TrialResult:
     cmd = [
         str(binary),
@@ -247,6 +259,8 @@ def _run_chunk_rewrite(
         "--enable-log",
         f"--log-file={log_file}",
     ]
+    if max_page_rows > 0:
+        cmd.append(f"--max-page-rows={max_page_rows}")
     if skip_validation:
         cmd.append("--skip-validation")
 
@@ -291,7 +305,11 @@ def _pick_search_columns(
     if scope == "all":
         return list(all_names)
     if scope == "fastlane-eligible":
-        return [c.name for c in columns if _is_fastlanes_eligible_int32(c)]
+        return [
+            c.name
+            for c in columns
+            if _is_fastlanes_eligible_int32(c) or _is_fastlanes_eligible_int64(c)
+        ]
 
     requested = [c.strip() for c in custom_columns_raw.split(",") if c.strip()]
     if not requested:
@@ -346,6 +364,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=2,
         help="Batch size for parquet_io_chunk (controls memory/speed)",
+    )
+    p.add_argument(
+        "--max-page-rows",
+        type=int,
+        default=0,
+        help=(
+            "Rows per data page forwarded to parquet_io_chunk (0 keeps its default). "
+            "Use a multiple of 1024 so FastLanes pages carry no vector padding."
+        ),
     )
     p.add_argument(
         "--search-scope",
@@ -462,6 +489,7 @@ def main() -> int:
             batch_size=args.batch_size,
             skip_validation=skip_validation,
             show_chunk_logs=args.show_chunk_logs,
+            max_page_rows=args.max_page_rows,
         )
         cache[key] = result
 
@@ -562,6 +590,7 @@ def main() -> int:
             batch_size=args.batch_size,
             skip_validation=False,
             show_chunk_logs=args.show_chunk_logs,
+            max_page_rows=args.max_page_rows,
         )
         print(
             f"final rc={final_result.return_code} "

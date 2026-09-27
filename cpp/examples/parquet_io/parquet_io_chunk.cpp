@@ -21,6 +21,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -215,6 +216,16 @@ struct cli_config {
   // Parallelization settings
   int batch_size = DEFAULT_BATCH_SIZE;
 
+  // Row groups read (and written) per call; 1 keeps the one-row-group-per-call behavior
+  int rgs_per_read = 1;
+
+  // Rows per data page; 0 keeps the default of (first row group rows / DEFAULT_PAGES_PER_ROW_GROUP)
+  cudf::size_type max_page_rows = 0;
+
+  // Rows per page fragment; pages and row groups are built from whole fragments. 0 keeps cuDF's
+  // default sizing (5000 rows for most columns).
+  cudf::size_type page_fragment_rows = 0;
+
   // Logging settings
   bool enable_logging    = false;
   std::string log_file   = "";  // Empty means auto-generate with timestamp
@@ -259,6 +270,21 @@ cudf::io::table_with_metadata read_row_group(cudf::io::source_info const& source
 {
   auto read_options =
     cudf::io::parquet_reader_options::builder(source_info).row_groups({{row_group_index}}).build();
+  return cudf::io::read_parquet(read_options, stream);
+}
+
+/**
+ * @brief Read row groups [first, first + count) from a parquet file in one call
+ */
+cudf::io::table_with_metadata read_row_groups(cudf::io::source_info const& source_info,
+                                              int first,
+                                              int count,
+                                              cuda::stream_ref stream)
+{
+  std::vector<cudf::size_type> row_groups(count);
+  std::iota(row_groups.begin(), row_groups.end(), first);
+  auto read_options =
+    cudf::io::parquet_reader_options::builder(source_info).row_groups({row_groups}).build();
   return cudf::io::read_parquet(read_options, stream);
 }
 
@@ -325,7 +351,9 @@ void process_parquet_by_row_group(cli_config const& config)
   auto first_rg_tbl_rows = first_rg.tbl->num_rows();
 
   auto const max_page_size_rows =
-    std::max<cudf::size_type>(1, first_rg_tbl_rows / DEFAULT_PAGES_PER_ROW_GROUP);
+    config.max_page_rows > 0
+      ? config.max_page_rows
+      : std::max<cudf::size_type>(1, first_rg_tbl_rows / DEFAULT_PAGES_PER_ROW_GROUP);
 
   // Determine stats level
   auto stats_level = config.enable_stats ? cudf::io::statistics_freq::STATISTICS_COLUMN
@@ -334,6 +362,9 @@ void process_parquet_by_row_group(cli_config const& config)
   g_logger.log_raw("=== Writer Configuration ===");
   g_logger.log_raw("  Pages per RG (target): " + std::to_string(DEFAULT_PAGES_PER_ROW_GROUP));
   g_logger.log_raw("  Max page size (rows):  " + std::to_string(max_page_size_rows));
+  g_logger.log_raw("  Page fragment (rows):  " +
+                   (config.page_fragment_rows > 0 ? std::to_string(config.page_fragment_rows)
+                                                  : std::string{"cuDF default"}));
   g_logger.log_raw("  Row Group size (rows): " + std::to_string(first_rg_tbl_rows) +
                    " (from first RG)");
   g_logger.log_raw("  V2 Headers:            " +
@@ -351,6 +382,9 @@ void process_parquet_by_row_group(cli_config const& config)
                                   .row_group_size_rows(first_rg_tbl_rows)
                                   .max_page_size_rows(max_page_size_rows)
                                   .write_v2_headers(config.enable_v2_headers);
+  if (config.page_fragment_rows > 0) {
+    writer_options_builder.max_page_fragment_size(config.page_fragment_rows);
+  }
 
   cudf::io::chunked_parquet_writer writer(writer_options_builder.build(), stream);
 
@@ -393,10 +427,12 @@ void process_parquet_by_row_group(cli_config const& config)
     std::vector<cudf::io::table_with_metadata> batch_tables;
     batch_tables.reserve(current_batch_size);
 
-    // Read and write all RGs in this batch
-    for (int rg_idx = batch_start; rg_idx < batch_end; ++rg_idx) {
+    // Read and write all RGs in this batch, `rgs_per_read` row groups per call. The writer splits
+    // each call's table at the input row group size, so the row group layout is unchanged.
+    for (int rg_idx = batch_start; rg_idx < batch_end; rg_idx += config.rgs_per_read) {
+      int const rg_count = std::min(config.rgs_per_read, batch_end - rg_idx);
       timer rg_read_timer;
-      batch_tables.push_back(read_row_group(source_info, rg_idx, stream));
+      batch_tables.push_back(read_row_groups(source_info, rg_idx, rg_count, stream));
       double read_time_ms = rg_read_timer.elapsed_millis();
 
       auto& table_with_meta = batch_tables.back();
@@ -407,10 +443,11 @@ void process_parquet_by_row_group(cli_config const& config)
       writer.write(table_with_meta.tbl->view());
       double write_time_ms = rg_write_timer.elapsed_millis();
 
-      g_logger.log("  Queued RG " + std::to_string(rg_idx) + "/" + std::to_string(num_row_groups) +
-                   " (" + std::to_string(rg_rows) + " rows) - read: " +
-                   std::to_string(read_time_ms) + "ms, write: " + std::to_string(write_time_ms) +
-                   "ms");
+      g_logger.log("  Queued RG " + std::to_string(rg_idx) +
+                   (rg_count > 1 ? "-" + std::to_string(rg_idx + rg_count - 1) : "") + "/" +
+                   std::to_string(num_row_groups) + " (" + std::to_string(rg_rows) +
+                   " rows) - read: " + std::to_string(read_time_ms) +
+                   "ms, write: " + std::to_string(write_time_ms) + "ms");
     }
 
     // Synchronize after the batch
@@ -461,7 +498,9 @@ void process_parquet_by_row_group(cli_config const& config)
 /**
  * @brief Validate output file by comparing row group by row group with input
  */
-bool validate_row_group_by_row_group(std::string const& input_file, std::string const& output_file)
+bool validate_row_group_by_row_group(std::string const& input_file,
+                                     std::string const& output_file,
+                                     int rgs_per_read)
 {
   auto stream = cudf::get_default_stream();
 
@@ -487,16 +526,18 @@ bool validate_row_group_by_row_group(std::string const& input_file, std::string 
   bool all_passed = true;
   timer validation_timer;
 
-  for (int rg_idx = 0; rg_idx < input_num_rg; ++rg_idx) {
+  for (int rg_idx = 0; rg_idx < input_num_rg; rg_idx += rgs_per_read) {
+    int const rg_count = std::min(rgs_per_read, input_num_rg - rg_idx);
     timer rg_timer;
-    auto input_rg  = read_row_group(input_source, rg_idx, stream);
-    auto output_rg = read_row_group(output_source, rg_idx, stream);
+    auto input_rg  = read_row_groups(input_source, rg_idx, rg_count, stream);
+    auto output_rg = read_row_groups(output_source, rg_idx, rg_count, stream);
     stream.sync();
 
     try {
       check_tables_equal(input_rg.tbl->view(), output_rg.tbl->view());
-      g_logger.log("  RG " + std::to_string(rg_idx) + " validated in " +
-                   std::to_string(rg_timer.elapsed_millis()) + " ms");
+      g_logger.log("  RG " + std::to_string(rg_idx) +
+                   (rg_count > 1 ? "-" + std::to_string(rg_idx + rg_count - 1) : "") +
+                   " validated in " + std::to_string(rg_timer.elapsed_millis()) + " ms");
     } catch (std::exception const& e) {
       g_logger.log_raw("VALIDATION FAILED at Row Group " + std::to_string(rg_idx) + ": " +
                        e.what());
@@ -554,6 +595,17 @@ cli_config parse_args(int argc, char const** argv)
         std::cerr << "Warning: batch-size " << config.batch_size << " exceeds recommended max ("
                   << MAX_BATCH_SIZE << "). High GPU memory usage expected." << std::endl;
       }
+    } else if (arg.rfind("--rgs-per-read=", 0) == 0) {
+      config.rgs_per_read = std::stoi(arg.substr(15));
+      if (config.rgs_per_read < 1) { throw std::invalid_argument("rgs-per-read must be >= 1"); }
+    } else if (arg.rfind("--page-fragment-rows=", 0) == 0) {
+      config.page_fragment_rows = std::stoi(arg.substr(21));
+      if (config.page_fragment_rows < 1) {
+        throw std::invalid_argument("page-fragment-rows must be >= 1");
+      }
+    } else if (arg.rfind("--max-page-rows=", 0) == 0) {
+      config.max_page_rows = std::stoi(arg.substr(16));
+      if (config.max_page_rows < 1) { throw std::invalid_argument("max-page-rows must be >= 1"); }
     } else if (arg == "--enable-log") {
       config.enable_logging = true;
     } else if (arg.rfind("--log-file=", 0) == 0) {
@@ -608,6 +660,20 @@ void print_usage()
        "                        Recommended max: "
     << MAX_BATCH_SIZE
     << "\n"
+       "  --rgs-per-read=N    : Row Groups read and written per call (default: 1). Cuts\n"
+       "                        per-call overhead on files with many small Row Groups. The\n"
+       "                        writer re-splits each call in whole page fragments, so pick a\n"
+       "                        --page-fragment-rows that divides the Row Group size to keep\n"
+       "                        the input Row Group layout.\n"
+       "  --max-page-rows=N   : Upper bound on rows per data page (default: first Row Group\n"
+       "                        rows / "
+    << DEFAULT_PAGES_PER_ROW_GROUP
+    << "). Pages hold whole page fragments, so a cap below\n"
+       "                        the fragment size has no effect.\n"
+       "  --page-fragment-rows=N : Rows per page fragment (default: cuDF's, 5000 for most\n"
+       "                        columns). Set it equal to --max-page-rows for exact page\n"
+       "                        sizes; FastLanes pads every page to whole 1024-value vectors,\n"
+       "                        so multiples of 1024 avoid padding.\n"
        "  --enable-stats      : Enable page-level statistics in output\n"
        "  --enable-v2-headers : Enable Parquet V2 data page headers\n"
        "  --skip-validation   : Skip validation after processing\n"
@@ -732,7 +798,8 @@ int main(int argc, char const** argv)
 
     // Step 2: Validate (unless skipped)
     if (!config.skip_validation) {
-      if (!validate_row_group_by_row_group(config.input_filepath, config.output_filepath)) {
+      if (!validate_row_group_by_row_group(
+            config.input_filepath, config.output_filepath, config.rgs_per_read)) {
         g_logger.close();
         return 1;
       }
