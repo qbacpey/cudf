@@ -1051,7 +1051,7 @@ void decode_fastlanes_raw32(cudf::detail::hostdevice_span<PageInfo> pages,
                             int level_type_size,
                             cudf::device_span<bool const> page_mask,
                             kernel_error::pointer error_code,
-                            rmm::cuda_stream_view stream);
+                            cuda::stream_ref stream);
 
 /**
  * @brief Launches kernel for reading FASTLANE_BITPACK_SPLIT64 pages.
@@ -1063,7 +1063,7 @@ void decode_fastlanes_split64(cudf::detail::hostdevice_span<PageInfo> pages,
                               int level_type_size,
                               cudf::device_span<bool const> page_mask,
                               kernel_error::pointer error_code,
-                              rmm::cuda_stream_view stream);
+                              cuda::stream_ref stream);
 
 /**
  * @brief Launches kernel for reading FASTLANES_DELTA_BINARY pages.
@@ -1075,7 +1075,7 @@ void decode_fastlanes_native64(cudf::detail::hostdevice_span<PageInfo> pages,
                                int level_type_size,
                                cudf::device_span<bool const> page_mask,
                                kernel_error::pointer error_code,
-                               rmm::cuda_stream_view stream);
+                               cuda::stream_ref stream);
 
 /**
  * @brief Launches kernel for reading the DELTA_BYTE_ARRAY column data stored in the pages

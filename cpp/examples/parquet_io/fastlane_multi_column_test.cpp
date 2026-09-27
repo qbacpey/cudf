@@ -12,8 +12,9 @@
 #include <cudf/fastlanes/fastlanes_encode.cuh>
 #include <cudf/io/parquet.hpp>
 #include <cudf/table/table.hpp>
+#include <cudf/utilities/default_stream.hpp>
 
-#include <rmm/cuda_stream_view.hpp>
+#include <cuda/stream_ref>
 #include <rmm/device_uvector.hpp>
 
 #include <iostream>
@@ -128,15 +129,15 @@ ColumnData generate_column_data(const ColumnConfig& config, size_t num_rows)
 template <typename T>
 std::unique_ptr<cudf::column> create_column_impl(const std::vector<T>& host_data,
                                                   cudf::type_id tid,
-                                                  rmm::cuda_stream_view stream)
+                                                  cuda::stream_ref stream)
 {
   rmm::device_uvector<T> d_data(host_data.size(), stream);
   cudaMemcpyAsync(d_data.data(),
                   host_data.data(),
                   host_data.size() * sizeof(T),
                   cudaMemcpyHostToDevice,
-                  stream.value());
-  cudaStreamSynchronize(stream.value());
+                  stream.get());
+  cudaStreamSynchronize(stream.get());
 
   return std::make_unique<cudf::column>(
     cudf::data_type{tid},
@@ -148,7 +149,7 @@ std::unique_ptr<cudf::column> create_column_impl(const std::vector<T>& host_data
 
 std::unique_ptr<cudf::column> create_column(const ColumnData& data,
                                              cudf::type_id tid,
-                                             rmm::cuda_stream_view stream)
+                                             cuda::stream_ref stream)
 {
   return std::visit(
     [&](const auto& vec) { return create_column_impl(vec, tid, stream); }, data);
@@ -276,7 +277,7 @@ bool run_multi_column_test(const TestConfig& config)
 
   for (size_t i = 0; i < config.columns.size(); ++i) {
     columns.push_back(
-      create_column(all_data[i], config.columns[i].type_id, rmm::cuda_stream_default));
+      create_column(all_data[i], config.columns[i].type_id, cudf::get_default_stream()));
   }
 
   // Create table view

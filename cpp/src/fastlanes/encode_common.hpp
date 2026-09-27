@@ -47,14 +47,14 @@ inline void cuda_check(cudaError_t err, char const* operation)
   }
 }
 
-inline void upload_encoded_blob(EncodedPageResult& result, rmm::cuda_stream_view stream)
+inline void upload_encoded_blob(EncodedPageResult& result, cuda::stream_ref stream)
 {
   result.device_blob = rmm::device_buffer(result.host_blob.size(), stream);
   cuda_check(cudaMemcpyAsync(result.device_blob.data(),
                              result.host_blob.data(),
                              result.host_blob.size(),
                              cudaMemcpyHostToDevice,
-                             stream.value()),
+                             stream.get()),
              "upload");
 }
 
@@ -195,9 +195,9 @@ void encode_vectors(unsigned_t<T> const* input,
   }
 }
 
-EncodedPageResult create_empty_result(Encoding encoding, rmm::cuda_stream_view stream);
-EncodedPageResult create_empty_scalar32_result(rmm::cuda_stream_view stream);
-EncodedPageResult create_empty_split32_result(rmm::cuda_stream_view stream);
-EncodedPageResult create_empty_native64_result(rmm::cuda_stream_view stream);
+EncodedPageResult create_empty_result(Encoding encoding, cuda::stream_ref stream);
+EncodedPageResult create_empty_scalar32_result(cuda::stream_ref stream);
+EncodedPageResult create_empty_split32_result(cuda::stream_ref stream);
+EncodedPageResult create_empty_native64_result(cuda::stream_ref stream);
 
 }  // namespace cudf::io::parquet::detail::fastlanes::detail

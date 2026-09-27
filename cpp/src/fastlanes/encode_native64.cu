@@ -5,8 +5,9 @@
 #include <rmm/device_uvector.hpp>
 #include <rmm/exec_policy.hpp>
 
+#include <cuda/functional>
+#include <cuda/std/functional>
 #include <thrust/fill.h>
-#include <thrust/functional.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/transform_reduce.h>
 
@@ -21,7 +22,7 @@ namespace native64_encoder = cudf::io::parquet::detail::fastlanes::native64;
 
 EncodedPageResult encode_native64_page_helper(int64_t const* d_input,
                                               uint32_t count,
-                                              rmm::cuda_stream_view stream)
+                                              cuda::stream_ref stream)
 {
   if (count == 0) { return detail::create_empty_native64_result(stream); }
 
@@ -31,7 +32,7 @@ EncodedPageResult encode_native64_page_helper(int64_t const* d_input,
 
   auto const* d_input_u64 = reinterpret_cast<uint64_t const*>(d_input);
   auto const min_value_bits =
-    native64_encoder::derive_min_base_bits(d_input_u64, count, stream.value());
+    native64_encoder::derive_min_base_bits(d_input_u64, count, stream.get());
 
   auto const idx_begin = thrust::make_counting_iterator<uint32_t>(0);
   auto const idx_end   = idx_begin + count;
@@ -43,7 +44,7 @@ EncodedPageResult encode_native64_page_helper(int64_t const* d_input,
       return d_input_u64[idx] - min_value_bits;
     },
     uint64_t{0},
-    thrust::maximum<uint64_t>{});
+    cuda::maximum<uint64_t>{});
 
   auto const has_negative = thrust::transform_reduce(
     rmm::exec_policy(stream),
@@ -53,7 +54,7 @@ EncodedPageResult encode_native64_page_helper(int64_t const* d_input,
       return (d_input_u64[idx] & (uint64_t{1} << 63)) != 0;
     },
     false,
-    thrust::logical_or<bool>{});
+    cuda::std::logical_or<bool>{});
   auto const cast_mode = has_negative ? ::fastlanes::TypeCastMode::SIGNED_REINTERPRET
                                       : ::fastlanes::TypeCastMode::SIGNED_SAFE;
 
@@ -71,7 +72,7 @@ EncodedPageResult encode_native64_page_helper(int64_t const* d_input,
                                      d_input_u64,
                                      count * sizeof(uint64_t),
                                      cudaMemcpyDeviceToDevice,
-                                     stream.value()),
+                                     stream.get()),
                      "copy native64 input");
 
   EncodedPageResult result;
@@ -93,13 +94,13 @@ EncodedPageResult encode_native64_page_helper(int64_t const* d_input,
                                      serialized_layout.data(),
                                      header_size,
                                      cudaMemcpyHostToDevice,
-                                     stream.value()),
+                                     stream.get()),
                      "upload native64 header");
 
   auto* payload_device_ptr = reinterpret_cast<uint64_t*>(
     ::fastlanes::PageHeader::payload_ptr(static_cast<uint8_t*>(result.device_blob.data())));
   native64_encoder::launch_native64_encode(
-    bitwidth, padded_input.data(), payload_device_ptr, min_value_bits, count, stream.value());
+    bitwidth, padded_input.data(), payload_device_ptr, min_value_bits, count, stream.get());
 
   result.bitwidth       = bitwidth;
   result.cast_mode      = cast_mode;
@@ -114,7 +115,7 @@ EncodedPageResult encode_native64_page_helper(int64_t const* d_input,
 std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
 encode_native64_pages_helper(std::vector<int64_t*> const& h_gather_ptrs,
                              std::vector<uint32_t> const& h_gather_counts,
-                             rmm::cuda_stream_view stream)
+                             cuda::stream_ref stream)
 {
   size_t const num_pages = h_gather_ptrs.size();
 
@@ -143,7 +144,7 @@ encode_native64_pages_helper(std::vector<int64_t*> const& h_gather_ptrs,
 
 EncodedPageResult FastLanesInt64NativeEncoder::encode_page(int64_t const* d_input,
                                                            uint32_t count,
-                                                           rmm::cuda_stream_view stream)
+                                                           cuda::stream_ref stream)
 {
   return encode_native64_page_helper(d_input, count, stream);
 }
@@ -151,7 +152,7 @@ EncodedPageResult FastLanesInt64NativeEncoder::encode_page(int64_t const* d_inpu
 std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
 FastLanesInt64NativeEncoder::encode_pages(std::vector<int64_t*> const& h_gather_ptrs,
                                           std::vector<uint32_t> const& h_gather_counts,
-                                          rmm::cuda_stream_view stream)
+                                          cuda::stream_ref stream)
 {
   return encode_native64_pages_helper(h_gather_ptrs, h_gather_counts, stream);
 }

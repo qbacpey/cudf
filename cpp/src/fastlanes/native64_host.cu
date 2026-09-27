@@ -10,6 +10,8 @@
 
 #include <cuda_runtime_api.h>
 #include <rmm/exec_policy.hpp>
+
+#include <cuda/functional>
 #include <thrust/reduce.h>
 
 #include <cstddef>
@@ -39,7 +41,7 @@ uint64_t derive_min_base_bits(uint64_t const* values, uint32_t total_count, cuda
                         values,
                         values + total_count,
                         std::numeric_limits<uint64_t>::max(),
-                        thrust::minimum<uint64_t>());
+                        cuda::minimum<uint64_t>());
 }
 
 void launch_native64_encode(uint8_t bw,

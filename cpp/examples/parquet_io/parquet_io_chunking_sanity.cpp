@@ -63,7 +63,7 @@ void process_parquet_by_row_group(std::string const& input_file, std::string con
     writer.write(table_with_meta.tbl->view());
 
     // 3d. Synchronize and release memory
-    stream.synchronize();
+    stream.sync();
 
     // The unique_ptr (table_with_meta.tbl) goes out of scope here,
     // automatically releasing GPU memory for this row group.

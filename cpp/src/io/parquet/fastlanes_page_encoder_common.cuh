@@ -105,15 +105,15 @@ struct fastlanes_cpu_upload_buffers {
 };
 
 inline std::vector<EncPage> copy_fastlanes_pages_to_host(device_span<EncPage> pages,
-                                                         rmm::cuda_stream_view stream)
+                                                         cuda::stream_ref stream)
 {
   std::vector<EncPage> host_pages(pages.size());
-  cudaMemcpyAsync(host_pages.data(),
-                  pages.data(),
-                  pages.size_bytes(),
-                  cudaMemcpyDeviceToHost,
-                  stream.value());
-  cudaStreamSynchronize(stream.value());
+  CUDF_CUDA_TRY(cudaMemcpyAsync(host_pages.data(),
+                                pages.data(),
+                                pages.size_bytes(),
+                                cudaMemcpyDeviceToHost,
+                                stream.get()));
+  CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
   return host_pages;
 }
 
@@ -159,27 +159,28 @@ inline void upload_fastlanes_results_and_launch(
   device_span<codec_exec_result> comp_results,
   fastlanes_cpu_upload_buffers const& upload_buffers,
   uint32_t fastlanes_kernel_mask_bits,
-  rmm::cuda_stream_view stream)
+  cuda::stream_ref stream)
 {
   auto const num_pages = pages.size();
   rmm::device_uvector<uint8_t*> d_upload_ptrs(num_pages, stream);
   rmm::device_uvector<uint32_t> d_upload_sizes(num_pages, stream);
-  cudaMemcpyAsync(d_upload_ptrs.data(),
-                  upload_buffers.host_upload_ptrs.data(),
-                  num_pages * sizeof(uint8_t*),
-                  cudaMemcpyHostToDevice,
-                  stream.value());
-  cudaMemcpyAsync(d_upload_sizes.data(),
-                  upload_buffers.host_upload_sizes.data(),
-                  num_pages * sizeof(uint32_t),
-                  cudaMemcpyHostToDevice,
-                  stream.value());
+  CUDF_CUDA_TRY(cudaMemcpyAsync(d_upload_ptrs.data(),
+                                upload_buffers.host_upload_ptrs.data(),
+                                num_pages * sizeof(uint8_t*),
+                                cudaMemcpyHostToDevice,
+                                stream.get()));
+  CUDF_CUDA_TRY(cudaMemcpyAsync(d_upload_sizes.data(),
+                                upload_buffers.host_upload_sizes.data(),
+                                num_pages * sizeof(uint32_t),
+                                cudaMemcpyHostToDevice,
+                                stream.get()));
 
   auto const kernel_mask = static_cast<encode_kernel_mask>(fastlanes_kernel_mask_bits);
-  gpuEncodePageLevels<encode_block_size><<<num_pages, encode_block_size, 0, stream.value()>>>(
+  gpuEncodePageLevels<encode_block_size><<<num_pages, encode_block_size, 0, stream.get()>>>(
     pages, write_v2_headers, kernel_mask);
+  CUDF_CUDA_TRY(cudaGetLastError());
 
-  gpuEncodeCpuPages<encode_block_size><<<num_pages, encode_block_size, 0, stream.value()>>>(
+  gpuEncodeCpuPages<encode_block_size><<<num_pages, encode_block_size, 0, stream.get()>>>(
     pages,
     comp_in,
     comp_out,
@@ -188,6 +189,7 @@ inline void upload_fastlanes_results_and_launch(
     d_upload_sizes.data(),
     write_v2_headers,
     kernel_mask);
+  CUDF_CUDA_TRY(cudaGetLastError());
 }
 
 // =============================================================================
@@ -263,7 +265,7 @@ inline void validate_category_headers_batched(
   std::vector<fastlanes_page_category> const& category,
   std::vector<uint8_t*> const& enc_ptrs,
   std::vector<uint32_t> const& enc_sizes,
-  rmm::cuda_stream_view stream)
+  cuda::stream_ref stream)
 {
   size_t const n = category.size();
   if (n == 0) { return; }
@@ -273,13 +275,13 @@ inline void validate_category_headers_batched(
   for (size_t i = 0; i < n; ++i) {
     if (enc_ptrs[i] == nullptr || enc_sizes[i] == 0) { continue; }
     auto const probe = std::min(static_cast<size_t>(enc_sizes[i]), header_probe_bytes);
-    cudaMemcpyAsync(header_scratch.data() + i * header_probe_bytes,
-                    enc_ptrs[i],
-                    probe,
-                    cudaMemcpyDeviceToHost,
-                    stream.value());
+    CUDF_CUDA_TRY(cudaMemcpyAsync(header_scratch.data() + i * header_probe_bytes,
+                                  enc_ptrs[i],
+                                  probe,
+                                  cudaMemcpyDeviceToHost,
+                                  stream.get()));
   }
-  cudaStreamSynchronize(stream.value());
+  CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
 
   for (size_t i = 0; i < n; ++i) {
     if (enc_ptrs[i] == nullptr || enc_sizes[i] == 0) { continue; }

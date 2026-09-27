@@ -255,7 +255,7 @@ int64_t get_file_size(std::string const& filepath)
  */
 cudf::io::table_with_metadata read_row_group(cudf::io::source_info const& source_info,
                                              int row_group_index,
-                                             rmm::cuda_stream_view stream)
+                                             cuda::stream_ref stream)
 {
   auto read_options =
     cudf::io::parquet_reader_options::builder(source_info).row_groups({{row_group_index}}).build();
@@ -371,7 +371,7 @@ void process_parquet_by_row_group(cli_config const& config)
     g_logger.log("  Processing RG 0/" + std::to_string(num_row_groups) + " (" +
                  std::to_string(first_rg.tbl->num_rows()) + " rows)...");
     writer.write(first_rg.tbl->view());
-    stream.synchronize();
+    stream.sync();
     double elapsed_ms = rg_timer.elapsed_millis();
     rg_times_ms.push_back(elapsed_ms);
     total_rows_processed += first_rg.tbl->num_rows();
@@ -415,7 +415,7 @@ void process_parquet_by_row_group(cli_config const& config)
 
     // Synchronize after the batch
     timer sync_timer;
-    stream.synchronize();
+    stream.sync();
     double sync_time_ms = sync_timer.elapsed_millis();
 
     double batch_time_ms = batch_timer.elapsed_millis();
@@ -491,7 +491,7 @@ bool validate_row_group_by_row_group(std::string const& input_file, std::string 
     timer rg_timer;
     auto input_rg  = read_row_group(input_source, rg_idx, stream);
     auto output_rg = read_row_group(output_source, rg_idx, stream);
-    stream.synchronize();
+    stream.sync();
 
     try {
       check_tables_equal(input_rg.tbl->view(), output_rg.tbl->view());

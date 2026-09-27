@@ -247,7 +247,7 @@ enum class data_pattern : uint8_t { randomized, adversarial, pathological };
 
   if (values_bytes > 0) {
     auto const h2d_status = cudaMemcpyAsync(
-      d_values, values.data(), values_bytes, cudaMemcpyHostToDevice, stream.value());
+      d_values, values.data(), values_bytes, cudaMemcpyHostToDevice, stream.get());
     if (h2d_status != cudaSuccess) {
       auto err_msg = cuda_error(h2d_status, "cudaMemcpy H2D values");
       cleanup();
@@ -256,7 +256,7 @@ enum class data_pattern : uint8_t { randomized, adversarial, pathological };
   }
 
   if (packed_bytes > 0) {
-    auto const memset_status = cudaMemsetAsync(d_packed, 0, packed_bytes, stream.value());
+    auto const memset_status = cudaMemsetAsync(d_packed, 0, packed_bytes, stream.get());
     if (memset_status != cudaSuccess) {
       auto err_msg = cuda_error(memset_status, "cudaMemset packed");
       cleanup();
@@ -264,9 +264,9 @@ enum class data_pattern : uint8_t { randomized, adversarial, pathological };
     }
   }
 
-  encode_bw37_gpu(d_values, d_packed, base_bits, total_count, stream.value());
+  encode_bw37_gpu(d_values, d_packed, base_bits, total_count, stream.get());
 
-  auto const sync_status = cudaStreamSynchronize(stream.value());
+  auto const sync_status = cudaStreamSynchronize(stream.get());
   if (sync_status != cudaSuccess) {
     auto err_msg = cuda_error(sync_status, "cudaStreamSynchronize");
     cleanup();
@@ -275,14 +275,14 @@ enum class data_pattern : uint8_t { randomized, adversarial, pathological };
 
   if (packed_bytes > 0) {
     auto const d2h_status = cudaMemcpyAsync(
-      packed.data(), d_packed, packed_bytes, cudaMemcpyDeviceToHost, stream.value());
+      packed.data(), d_packed, packed_bytes, cudaMemcpyDeviceToHost, stream.get());
     if (d2h_status != cudaSuccess) {
       auto err_msg = cuda_error(d2h_status, "cudaMemcpy D2H packed");
       cleanup();
       throw std::runtime_error(err_msg);
     }
 
-    auto const d2h_sync_status = cudaStreamSynchronize(stream.value());
+    auto const d2h_sync_status = cudaStreamSynchronize(stream.get());
     if (d2h_sync_status != cudaSuccess) {
       auto err_msg = cuda_error(d2h_sync_status, "cudaStreamSynchronize");
       cleanup();
@@ -337,14 +337,14 @@ enum class data_pattern : uint8_t { randomized, adversarial, pathological };
 
   if (packed_bytes > 0) {
     auto const h2d_status = cudaMemcpyAsync(
-      d_packed, packed.data(), packed_bytes, cudaMemcpyHostToDevice, stream.value());
+      d_packed, packed.data(), packed_bytes, cudaMemcpyHostToDevice, stream.get());
     if (h2d_status != cudaSuccess) {
       auto err_msg = cuda_error(h2d_status, "cudaMemcpy H2D packed");
       cleanup();
       throw std::runtime_error(err_msg);
     }
   } else {
-    auto const packed_init_status = cudaMemsetAsync(d_packed, 0, packed_alloc_bytes, stream.value());
+    auto const packed_init_status = cudaMemsetAsync(d_packed, 0, packed_alloc_bytes, stream.get());
     if (packed_init_status != cudaSuccess) {
       auto err_msg = cuda_error(packed_init_status, "cudaMemset packed sentinel");
       cleanup();
@@ -353,7 +353,7 @@ enum class data_pattern : uint8_t { randomized, adversarial, pathological };
   }
 
   if (decoded_bytes > 0) {
-    auto const memset_status = cudaMemsetAsync(d_decoded, 0, decoded_bytes, stream.value());
+    auto const memset_status = cudaMemsetAsync(d_decoded, 0, decoded_bytes, stream.get());
     if (memset_status != cudaSuccess) {
       auto err_msg = cuda_error(memset_status, "cudaMemset decoded");
       cleanup();
@@ -361,9 +361,9 @@ enum class data_pattern : uint8_t { randomized, adversarial, pathological };
     }
   }
 
-  decode_bw37_gpu(d_packed, d_decoded, base_bits, total_count, stream.value());
+  decode_bw37_gpu(d_packed, d_decoded, base_bits, total_count, stream.get());
 
-  auto const sync_status = cudaStreamSynchronize(stream.value());
+  auto const sync_status = cudaStreamSynchronize(stream.get());
   if (sync_status != cudaSuccess) {
     auto err_msg = cuda_error(sync_status, "cudaStreamSynchronize");
     cleanup();
@@ -372,14 +372,14 @@ enum class data_pattern : uint8_t { randomized, adversarial, pathological };
 
   if (decoded_bytes > 0) {
     auto const d2h_status = cudaMemcpyAsync(
-      out_host.data(), d_decoded, decoded_bytes, cudaMemcpyDeviceToHost, stream.value());
+      out_host.data(), d_decoded, decoded_bytes, cudaMemcpyDeviceToHost, stream.get());
     if (d2h_status != cudaSuccess) {
       auto err_msg = cuda_error(d2h_status, "cudaMemcpy D2H decoded");
       cleanup();
       throw std::runtime_error(err_msg);
     }
 
-    auto const d2h_sync_status = cudaStreamSynchronize(stream.value());
+    auto const d2h_sync_status = cudaStreamSynchronize(stream.get());
     if (d2h_sync_status != cudaSuccess) {
       auto err_msg = cuda_error(d2h_sync_status, "cudaStreamSynchronize");
       cleanup();

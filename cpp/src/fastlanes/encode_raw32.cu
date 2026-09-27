@@ -10,7 +10,7 @@ EncodedPageResult encode_scalar32_page(std::vector<int32_t> const& host_input,
                                        uint32_t count,
                                        uint64_t padded,
                                        ::fastlanes::TypeCastMode cast_mode,
-                                       rmm::cuda_stream_view stream)
+                                       cuda::stream_ref stream)
 {
   EncodedPageResult result;
 
@@ -50,7 +50,7 @@ EncodedPageResult encode_scalar32_page(std::vector<int32_t> const& host_input,
 
 EncodedPageResult encode_scalar32_page_helper(int32_t const* d_input,
                                               uint32_t count,
-                                              rmm::cuda_stream_view stream)
+                                              cuda::stream_ref stream)
 {
   if (count == 0) { return detail::create_empty_scalar32_result(stream); }
 
@@ -63,9 +63,9 @@ EncodedPageResult encode_scalar32_page_helper(int32_t const* d_input,
 
   detail::cuda_check(
     cudaMemcpyAsync(
-      host_input.data(), d_input, count * sizeof(int32_t), cudaMemcpyDeviceToHost, stream.value()),
+      host_input.data(), d_input, count * sizeof(int32_t), cudaMemcpyDeviceToHost, stream.get()),
     "download");
-  detail::cuda_check(cudaStreamSynchronize(stream.value()), "stream synchronize after download");
+  detail::cuda_check(cudaStreamSynchronize(stream.get()), "stream synchronize after download");
 
   auto const cast_mode = detail::analyze_data(host_input.data(), count).first;
   return encode_scalar32_page(host_input, count, padded, cast_mode, stream);
@@ -74,7 +74,7 @@ EncodedPageResult encode_scalar32_page_helper(int32_t const* d_input,
 std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
 encode_scalar32_pages_helper(std::vector<int32_t*> const& h_gather_ptrs,
                              std::vector<uint32_t> const& h_gather_counts,
-                             rmm::cuda_stream_view stream)
+                             cuda::stream_ref stream)
 {
   size_t const num_pages = h_gather_ptrs.size();
 
@@ -103,7 +103,7 @@ encode_scalar32_pages_helper(std::vector<int32_t*> const& h_gather_ptrs,
 
 EncodedPageResult FastLanesInt32Encoder::encode_page(int32_t const* d_input,
                                                      uint32_t count,
-                                                     rmm::cuda_stream_view stream)
+                                                     cuda::stream_ref stream)
 {
   return encode_scalar32_page_helper(d_input, count, stream);
 }
@@ -111,7 +111,7 @@ EncodedPageResult FastLanesInt32Encoder::encode_page(int32_t const* d_input,
 std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
 FastLanesInt32Encoder::encode_pages(std::vector<int32_t*> const& h_gather_ptrs,
                                     std::vector<uint32_t> const& h_gather_counts,
-                                    rmm::cuda_stream_view stream)
+                                    cuda::stream_ref stream)
 {
   return encode_scalar32_pages_helper(h_gather_ptrs, h_gather_counts, stream);
 }

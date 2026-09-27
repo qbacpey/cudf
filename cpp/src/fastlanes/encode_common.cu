@@ -4,7 +4,7 @@
 
 namespace cudf::io::parquet::detail::fastlanes::detail {
 
-EncodedPageResult create_empty_result(Encoding encoding, rmm::cuda_stream_view stream)
+EncodedPageResult create_empty_result(Encoding encoding, cuda::stream_ref stream)
 {
   EncodedPageResult result;
   result.bitwidth       = 1;
@@ -36,23 +36,23 @@ EncodedPageResult create_empty_result(Encoding encoding, rmm::cuda_stream_view s
                              result.host_blob.data(),
                              result.host_blob.size(),
                              cudaMemcpyHostToDevice,
-                             stream.value()),
+                             stream.get()),
              "upload empty blob");
 
   return result;
 }
 
-EncodedPageResult create_empty_scalar32_result(rmm::cuda_stream_view stream)
+EncodedPageResult create_empty_scalar32_result(cuda::stream_ref stream)
 {
   return create_empty_result(Encoding::FASTLANE_BITPACK_RAW, stream);
 }
 
-EncodedPageResult create_empty_split32_result(rmm::cuda_stream_view stream)
+EncodedPageResult create_empty_split32_result(cuda::stream_ref stream)
 {
   return create_empty_result(Encoding::FASTLANE_BITPACK_SPLIT64, stream);
 }
 
-EncodedPageResult create_empty_native64_result(rmm::cuda_stream_view stream)
+EncodedPageResult create_empty_native64_result(cuda::stream_ref stream)
 {
   return create_empty_result(Encoding::FASTLANES_DELTA_BINARY, stream);
 }

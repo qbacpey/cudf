@@ -40,7 +40,7 @@ inline void encode_native64_category_batched(
   std::vector<fastlanes_page_category> const& category,
   parquet_fastlanes::FastLanesInt64NativeEncoder& encoder,
   fastlanes_cpu_upload_buffers& upload_buffers,
-  rmm::cuda_stream_view stream)
+  cuda::stream_ref stream)
 {
   size_t const n = category.size();
   if (n == 0) { return; }
@@ -54,8 +54,9 @@ inline void encode_native64_category_batched(
     auto const& cat = category[i];
     gather_buffers.emplace_back(cat.num_values, stream);
     gpuGatherSinglePageTyped<uint64_t, encode_block_size>
-      <<<1, encode_block_size, 0, stream.value()>>>(
+      <<<1, encode_block_size, 0, stream.get()>>>(
         pages, cat.page_idx, gather_buffers.back().data(), nullptr);
+    CUDF_CUDA_TRY(cudaGetLastError());
     gather_ptrs[i]   = reinterpret_cast<int64_t*>(gather_buffers.back().data());
     gather_counts[i] = cat.num_values;
   }
@@ -97,7 +98,7 @@ inline void run_fastlanes_native64_encode(
   device_span<device_span<uint8_t const>> comp_in,
   device_span<device_span<uint8_t>> comp_out,
   device_span<codec_exec_result> comp_results,
-  rmm::cuda_stream_view stream)
+  cuda::stream_ref stream)
 {
   auto host_pages = copy_fastlanes_pages_to_host(pages, stream);
   fastlanes_cpu_upload_buffers upload_buffers(pages.size());

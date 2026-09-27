@@ -919,7 +919,10 @@ std::vector<schema_tree_node> construct_parquet_schema_tree(
 // gets a compile-time warning. We still need to switch on it here to issue a hard runtime refusal,
 // so suppress the deprecation diagnostic locally for the case label only.
 #pragma nv_diag_suppress 1444
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
             case column_encoding::FASTLANE_BITPACK_SPLIT64:
+#pragma GCC diagnostic pop
 #pragma nv_diag_default 1444
               CUDF_FAIL(
                 "FASTLANE_BITPACK_SPLIT64 is deprecated due to a known sub-vector page-padding "

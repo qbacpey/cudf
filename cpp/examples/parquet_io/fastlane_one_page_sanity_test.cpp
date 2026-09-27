@@ -15,9 +15,10 @@
 #include <cudf/fastlanes/fls_gen/pack/pack.hpp>
 #include <cudf/io/parquet.hpp>
 #include <cudf/table/table.hpp>
+#include <cudf/utilities/default_stream.hpp>
 
 
-#include <rmm/cuda_stream_view.hpp>
+#include <cuda/stream_ref>
 #include <rmm/device_uvector.hpp>
 
 #include <algorithm>
@@ -150,15 +151,15 @@ std::vector<T> generate_random(size_t count, uint64_t max_value, unsigned seed =
 
 template <typename T>
 std::unique_ptr<cudf::column> create_column(const std::vector<T>& host_data,
-                                             rmm::cuda_stream_view stream)
+                                             cuda::stream_ref stream)
 {
   rmm::device_uvector<T> d_data(host_data.size(), stream);
   cudaMemcpyAsync(d_data.data(),
                   host_data.data(),
                   host_data.size() * sizeof(T),
                   cudaMemcpyHostToDevice,
-                  stream.value());
-  cudaStreamSynchronize(stream.value());
+                  stream.get());
+  cudaStreamSynchronize(stream.get());
 
   cudf::type_id tid;
   if constexpr (std::is_same_v<T, int32_t>) {
@@ -238,7 +239,7 @@ bool run_one_page_test(const std::string& type_name, bool use_random = false)
   // ===================================================================
   std::cout << "--- PART 2: cudf Parquet Writer ---\n\n";
 
-  auto col = create_column(host_data, rmm::cuda_stream_default);
+  auto col = create_column(host_data, cudf::get_default_stream());
   std::vector<cudf::column_view> cols{col->view()};
   cudf::table_view input(cols);
 

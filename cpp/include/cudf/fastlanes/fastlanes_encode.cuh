@@ -2,8 +2,9 @@
 
 #include <cudf/fastlanes/common.cuh>
 
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_buffer.hpp>
+
+#include <cuda/stream_ref>
 
 #include <cstdint>
 #include <tuple>
@@ -52,7 +53,7 @@ class FastLanesInt32Encoder {
    */
   EncodedPageResult encode_page(int32_t const* d_input,
                                 uint32_t count,
-                                rmm::cuda_stream_view stream);
+                                cuda::stream_ref stream);
 
   /**
    * @brief Encode a batch of INT32 pages into FastLanes RAW32 payloads.
@@ -65,7 +66,7 @@ class FastLanesInt32Encoder {
   std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
   encode_pages(std::vector<int32_t*> const& h_gather_ptrs,
                std::vector<uint32_t> const& h_gather_counts,
-               rmm::cuda_stream_view stream);
+               cuda::stream_ref stream);
 
 };
 
@@ -89,7 +90,7 @@ class FastLanesInt64Split32Encoder {
    */
   EncodedPageResult encode_page(int64_t const* d_input,
                                 uint32_t count,
-                                rmm::cuda_stream_view stream);
+                                cuda::stream_ref stream);
 
   /**
    * @brief Encode a batch of INT64 pages into FastLanes SPLIT64 payloads.
@@ -102,7 +103,7 @@ class FastLanesInt64Split32Encoder {
   std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
   encode_pages(std::vector<int64_t*> const& h_gather_ptrs,
                std::vector<uint32_t> const& h_gather_counts,
-               rmm::cuda_stream_view stream);
+               cuda::stream_ref stream);
 
 };
 
@@ -126,7 +127,7 @@ class FastLanesInt64NativeEncoder {
    */
   EncodedPageResult encode_page(int64_t const* d_input,
                                 uint32_t count,
-                                rmm::cuda_stream_view stream);
+                                cuda::stream_ref stream);
 
   /**
    * @brief Encode a batch of INT64 pages into FastLanes Native64 payloads.
@@ -139,7 +140,7 @@ class FastLanesInt64NativeEncoder {
   std::tuple<std::vector<rmm::device_buffer>, std::vector<uint8_t*>, std::vector<uint32_t>>
   encode_pages(std::vector<int64_t*> const& h_gather_ptrs,
                std::vector<uint32_t> const& h_gather_counts,
-               rmm::cuda_stream_view stream);
+               cuda::stream_ref stream);
 
 };
 
