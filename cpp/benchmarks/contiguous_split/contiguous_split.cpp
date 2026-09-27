@@ -1,9 +1,10 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2019-2026, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2019-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <benchmarks/common/generate_input.hpp>
+#include <benchmarks/common/memory_stats.hpp>
 
 #include <cudf_test/column_wrapper.hpp>
 
@@ -28,7 +29,7 @@ void chunked_pack(cudf::table_view const& src_table, std::vector<cudf::size_type
   while (chunked_pack->has_next()) {
     (void)chunked_pack->next(user_buffer);
   }
-  stream.synchronize();
+  stream.sync();
 }
 
 template <typename ContigSplitImpl>
@@ -57,11 +58,14 @@ void contiguous_split_common(nvbench::state& state,
   auto const src_table = cudf::table(std::move(src_cols));
 
   auto stream = cudf::get_default_stream();
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.value()));
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
   state.add_global_memory_reads<int8_t>(src_table.alloc_size());
   state.add_global_memory_writes<int8_t>(src_table.alloc_size());
 
+  auto const mem_stats_logger = cudf::memory_stats_logger();
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch&) { impl(src_table, splits); });
+  state.add_buffer_size(
+    mem_stats_logger.peak_memory_usage(), "peak_memory_usage", "peak_memory_usage");
 }
 
 void bench_contiguous_split_strings(nvbench::state& state);

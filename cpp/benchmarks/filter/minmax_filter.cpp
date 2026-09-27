@@ -1,9 +1,10 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <benchmarks/common/generate_input.hpp>
+#include <benchmarks/common/memory_stats.hpp>
 
 #include <cudf/ast/expressions.hpp>
 #include <cudf/column/column_factories.hpp>
@@ -12,8 +13,6 @@
 #include <cudf/types.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
-
-#include <rmm/cuda_stream_view.hpp>
 
 #include <cuda/iterator>
 
@@ -119,6 +118,7 @@ void BM_filter_min_max(nvbench::state& state)
   state.add_global_memory_reads<key_type>(static_cast<std::size_t>(num_rows));
   state.add_global_memory_writes<key_type>(num_rows);
 
+  auto const mem_stats_logger = cudf::memory_stats_logger();
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch& launch) {
     auto stream = launch.get_stream().get_stream();
     auto mr     = cudf::get_current_device_resource_ref();
@@ -129,7 +129,7 @@ void BM_filter_min_max(nvbench::state& state)
         auto filter_table         = cudf::table_view{filter_column_views};
         auto const filter_boolean = cudf::compute_column(predicate_table, tree.back(), stream, mr);
         auto const result =
-          cudf::apply_boolean_mask(filter_table, filter_boolean->view(), stream, mr);
+          cudf::apply_retention_mask(filter_table, filter_boolean->view(), stream, mr);
       } break;
       case engine_type::JIT: {
         cudf::filter_input predicate_inputs[] = {
@@ -149,6 +149,8 @@ void BM_filter_min_max(nvbench::state& state)
       default: CUDF_UNREACHABLE("Unrecognised engine type requested");
     }
   });
+  state.add_buffer_size(
+    mem_stats_logger.peak_memory_usage(), "peak_memory_usage", "peak_memory_usage");
 }
 
 #define FILTER_BENCHMARK_DEFINE(name, key_type)                                 \

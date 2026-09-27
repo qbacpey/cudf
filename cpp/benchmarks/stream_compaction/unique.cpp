@@ -1,9 +1,10 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2020-2026, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2020-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <benchmarks/common/generate_input.hpp>
+#include <benchmarks/common/memory_stats.hpp>
 
 #include <cudf/column/column_view.hpp>
 #include <cudf/copying.hpp>
@@ -54,10 +55,13 @@ void nvbench_unique(nvbench::state& state, nvbench::type_list<Type, nvbench::enu
   auto input_table  = cudf::table_view({input_column, input_column, input_column, input_column});
 
   auto const run_bench = [&](auto const& input) {
-    state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
+    state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().get()));
+    auto const mem_stats_logger = cudf::memory_stats_logger();
     state.exec(nvbench::exec_tag::sync, [&](nvbench::launch& launch) {
       auto result = cudf::unique(input, {0}, Keep, cudf::null_equality::EQUAL);
     });
+    state.add_buffer_size(
+      mem_stats_logger.peak_memory_usage(), "peak_memory_usage", "peak_memory_usage");
   };
 
   if (sorting) {
@@ -111,10 +115,13 @@ void nvbench_unique_list(nvbench::state& state, nvbench::type_list<Type, nvbench
     {dtype}, table_size_bytes{static_cast<size_t>(size)}, data_profile{builder}, 0);
 
   auto const run_bench = [&](auto const& input) {
-    state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
+    state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().get()));
+    auto const mem_stats_logger = cudf::memory_stats_logger();
     state.exec(nvbench::exec_tag::sync, [&](nvbench::launch& launch) {
       auto result = cudf::unique(input, {0}, Keep, cudf::null_equality::EQUAL);
     });
+    state.add_buffer_size(
+      mem_stats_logger.peak_memory_usage(), "peak_memory_usage", "peak_memory_usage");
   };
 
   if (sorting) {

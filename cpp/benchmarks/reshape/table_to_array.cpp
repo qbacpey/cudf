@@ -1,9 +1,10 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include <benchmarks/common/generate_input.hpp>
+#include <benchmarks/common/memory_stats.hpp>
 
 #include <cudf/reshape.hpp>
 #include <cudf/utilities/default_stream.hpp>
@@ -31,12 +32,15 @@ static void bench_table_to_array(nvbench::state& state)
   auto span = cudf::device_span<cuda::std::byte>(reinterpret_cast<cuda::std::byte*>(output.data()),
                                                  output.size());
 
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.value()));
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.get()));
   state.add_global_memory_reads<int32_t>(num_rows * num_cols);   // all bytes are read
   state.add_global_memory_writes<int32_t>(num_rows * num_cols);  // all bytes are written
 
+  auto const mem_stats_logger = cudf::memory_stats_logger();
   state.exec(nvbench::exec_tag::sync,
              [&](nvbench::launch& launch) { cudf::table_to_array(input_view, span, stream); });
+  state.add_buffer_size(
+    mem_stats_logger.peak_memory_usage(), "peak_memory_usage", "peak_memory_usage");
 }
 
 NVBENCH_BENCH(bench_table_to_array)

@@ -1,8 +1,9 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
 import pickle
+import threading
 from decimal import Decimal
 
 import pytest
@@ -15,7 +16,6 @@ from cudf_polars.containers import DataType
 from cudf_polars.dsl import expr as ir_expr
 from cudf_polars.dsl.ir import ConditionalJoin
 from cudf_polars.testing.asserts import assert_gpu_result_equal
-from cudf_polars.testing.engine_utils import is_streaming_engine
 
 
 @pytest.fixture(params=[False, True], ids=["nulls_not_equal", "nulls_equal"])
@@ -80,15 +80,7 @@ def test_non_coalesce_join(
     how,
     nulls_equal,
     join_expr,
-    request,
 ):
-    request.applymarker(
-        pytest.mark.xfail(
-            is_streaming_engine(engine),
-            strict=False,
-            reason="Non deterministic sort/join on nulls",
-        )
-    )
     query = left.join(
         right, on=join_expr, how=how, nulls_equal=nulls_equal, coalesce=False
     )
@@ -276,7 +268,7 @@ def test_join_maintain_order_with_slice(
     assert_gpu_result_equal(
         q,
         engine=engine,
-        polars_collect_kwargs={"optimizations": pl.QueryOptFlags(slice_pushdown=False)},
+        collect_kwargs={"optimizations": pl.QueryOptFlags(slice_pushdown=False)},
     )
 
 
@@ -354,3 +346,27 @@ def test_conditional_join_predicate_pickle():
     predicate = ConditionalJoin.Predicate(predicate_expr)
     unpickled = pickle.loads(pickle.dumps(predicate))
     assert unpickled.predicate == predicate.predicate
+
+
+def test_conditional_join_cuda_context_initialized():
+    # https://github.com/NVIDIA/cudf/issues/24156
+    # Create a ConditionalJoin.Predicate on a thread, mimicking how our
+    # cudf-polars does it when executing with a Ray or Dask engine.
+
+    dt = DataType(pl.Int64())
+    col_left = ir_expr.ColRef(
+        dt, 0, plc.expressions.TableReference.LEFT, ir_expr.Col(dt, "a")
+    )
+    col_right = ir_expr.ColRef(
+        dt, 0, plc.expressions.TableReference.RIGHT, ir_expr.Col(dt, "a")
+    )
+    predicate_expr = ir_expr.BinOp(
+        DataType(pl.Boolean()),
+        plc.binaryop.BinaryOperator.LESS,
+        col_left,
+        col_right,
+    )
+
+    t = threading.Thread(target=ConditionalJoin.Predicate, args=(predicate_expr,))
+    t.start()
+    t.join()

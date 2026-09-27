@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from decimal import Decimal
@@ -118,7 +118,7 @@ def test_concat_all_nulls(values):
 
 
 def test_concat_errors():
-    df, df2, gdf, gdf2 = make_frames()
+    df, _df2, gdf, gdf2 = make_frames()
 
     # No objs
     assert_exceptions_equal(
@@ -711,7 +711,7 @@ def test_concat_dataframe_with_multiindex(key2):
         ],
     ],
 )
-def test_concat_join(objs, ignore_index, sort, join, axis):
+def test_concat_join(objs, ignore_index, sort, join):
     axis = 0
     gpu_objs = [cudf.from_pandas(o) for o in objs]
 
@@ -780,7 +780,7 @@ def test_concat_join_axis_1_dup_error(objs):
         ],
     ],
 )
-def test_concat_join_axis_1(objs, ignore_index, sort, join, axis):
+def test_concat_join_axis_1(objs, ignore_index, sort, join):
     # no duplicate columns
     axis = 1
     gpu_objs = [cudf.from_pandas(o) for o in objs]
@@ -1200,7 +1200,7 @@ def test_concat_join_empty_dataframes(
     ],
 )
 def test_concat_join_empty_dataframes_axis_1(
-    df, other, ignore_index, axis, join, sort
+    df, other, ignore_index, join, sort
 ):
     # no duplicate columns
     axis = 1
@@ -1222,30 +1222,6 @@ def test_concat_join_empty_dataframes_axis_1(
         join=join,
         sort=sort,
     )
-    if expected.shape != df.shape:
-        if axis == 0:
-            for key, col in actual[actual.columns].items():
-                if isinstance(expected[key].dtype, pd.CategoricalDtype):
-                    expected[key] = expected[key].fillna("-1")
-                    actual[key] = col.astype("str").fillna("-1")
-            # if not expected.empty:
-            assert_eq(
-                expected.fillna(-1),
-                actual.fillna(-1),
-                check_dtype=False,
-                check_index_type=False
-                if len(expected) == 0 or actual.empty
-                else True,
-                check_column_type=False,
-            )
-        else:
-            # no need to fill in if axis=1
-            assert_eq(
-                expected,
-                actual,
-                check_index_type=False,
-                check_column_type=False,
-            )
     assert_eq(
         expected, actual, check_index_type=False, check_column_type=False
     )
@@ -1780,7 +1756,7 @@ def test_concat_list_column(
 
 
 def test_concat_categorical_ordering():
-    # https://github.com/rapidsai/cudf/issues/11486
+    # https://github.com/NVIDIA/cudf/issues/11486
     sr = pd.Series(
         ["a", "b", "c", "d", "e", "a", "b", "c", "d", "e"], dtype="category"
     )
@@ -2076,14 +2052,14 @@ def test_series_concat_error_mixed_types():
 
     with pytest.raises(
         TypeError,
-        match="cudf does not support mixed types, please type-cast "
+        match=r"cudf does not support mixed types, please type-cast "
         "both series to same dtypes.",
     ):
         cudf.concat([gsr, other])
 
     with pytest.raises(
         TypeError,
-        match="cudf does not support mixed types, please type-cast "
+        match=r"cudf does not support mixed types, please type-cast "
         "both series to same dtypes.",
     ):
         cudf.concat([gsr, gsr, other, gsr, other])

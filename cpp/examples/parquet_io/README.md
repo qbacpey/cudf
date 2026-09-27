@@ -1,15 +1,63 @@
-# Parquet IO Examples: Structure and Script Guide
+# libcudf C++ examples for Parquet I/O
 
-This directory contains C++ parquet examples plus helper tooling for validation,
+This C++ example demonstrates using libcudf APIs to read and write Parquet
+files with different encodings and compression types.
+
+Blog post that uses this code: https://developer.nvidia.com/blog/encoding-and-compression-guide-for-parquet-string-data-using-rapids/
+
+The following encoding and compression types are demonstrated:
+* Encoding types: `DEFAULT`, `DICTIONARY`, `PLAIN`, `DELTA_BINARY_PACKED`,
+  `DELTA_LENGTH_BYTE_ARRAY`, `DELTA_BYTE_ARRAY`
+* Compression types: `NONE`, `AUTO`, `SNAPPY`, `LZ4`, `ZSTD`
+
+There are two examples included:
+1. `parquet_io.cpp`
+   Reads an input Parquet file, writes it back out using the specified
+   encoding and compression (optionally with page statistics), reads the
+   transcoded file, and validates that the data round-trips correctly. The
+   write and read steps are timed.
+2. `parquet_io_multithreaded.cpp`
+   Reads one or more Parquet files (or directories of files) using multiple
+   threads and a configurable I/O source type (`FILEPATH`, `HOST_BUFFER`,
+   `PINNED_BUFFER`, `DEVICE_BUFFER`), optionally writing and validating the
+   output.
+
+## Compile and execute
+
+```bash
+# Configure project
+cmake -S . -B build/
+# Build
+cmake --build build/ --parallel $PARALLEL_LEVEL
+# Execute using the included example.parquet and default encoding/compression
+build/parquet_io
+# Execute with explicit arguments:
+#   <input file> <output file> <encoding type> <compression type> <write page stats: yes/no>
+build/parquet_io example.parquet output.parquet DELTA_BINARY_PACKED ZSTD
+# Execute the multithreaded example:
+#   <comma delimited list of dirs and/or files> <input multiplier> <io source type>
+#   <number of times to read> <thread count> <write to temp output files and validate: yes/no>
+build/parquet_io_multithreaded example.parquet
+```
+
+Pass `-h` or `--help` to either executable to print full usage information.
+
+If your machine does not come with a pre-built libcudf binary, expect the
+first build to take some time, as it would build libcudf on the host machine.
+It may be sped up by configuring the proper `PARALLEL_LEVEL` number.
+
+## FastLanes tooling: structure and script guide
+
+This directory also contains C++ parquet examples plus helper tooling for validation,
 encoding search, and FastLanes page-level analysis.
 
-The goal of this README is to make each script easy to understand:
+The goal of this section is to make each script easy to understand:
 - what it expects as input
 - what it does
 - what it writes
 - where outputs should live
 
-## High-Level Structure
+### High-Level Structure
 
 - `build/`
   - CMake output (not source)
@@ -26,7 +74,7 @@ Generated outputs are external-only and should be written under:
 - `${PARQUET_IO_SHARED_ROOT}/artifacts/<worktree>/...`
 - `${PARQUET_IO_SHARED_ROOT}/reports/<worktree>/...`
 
-## Layered Artifact Convention
+### Layered Artifact Convention
 
 For all new generated runs, use a 3-layer layout under
 `${PARQUET_IO_SHARED_ROOT}/artifacts/<worktree>/`:
@@ -63,9 +111,9 @@ ${PARQUET_IO_SHARED_ROOT}/artifacts/<worktree>/fastlanes/snappy_int64_page_stats
     cases/*.parquet
 ```
 
-## Script Catalog
+### Script Catalog
 
-### tools/search/search_best_parquet_encoding.py
+#### tools/search/search_best_parquet_encoding.py
 - Effect: greedy search for encoding + compression combinations
 - Input: parquet file + `parquet_io_chunk` binary
 - Output: `search_summary.json`, `search_summary.md`, trial logs, optional trial parquet files
@@ -75,7 +123,7 @@ ${PARQUET_IO_SHARED_ROOT}/artifacts/<worktree>/fastlanes/snappy_int64_page_stats
 python3 ./tools/search/search_best_parquet_encoding.py --help
 ```
 
-### tools/search/run_int64_snappy_page_stats.py
+#### tools/search/run_int64_snappy_page_stats.py
 - Effect: runs baseline + one-by-one + all-fastlane INT64 sensitivity cases
 - Input: parquet file, `parquet_io_chunk`, roundtrip helper script
 - Output: layered run folder (`01_human`, `02_machine`, `03_raw`)
@@ -87,7 +135,7 @@ python3 ./tools/search/search_best_parquet_encoding.py --help
 python3 ./tools/search/run_int64_snappy_page_stats.py --help
 ```
 
-### tools/search/extract_fastlanes_page_stats.py
+#### tools/search/extract_fastlanes_page_stats.py
 - Effect: parses FastLanes debug lines and builds page-level INT64 CSV
 - Input: run manifest CSV (typically `03_raw/run_manifest.csv`)
 - Output: `page_stats_int64_fastlanes.csv` (raw), optional extraction summary json (machine)
@@ -96,7 +144,7 @@ python3 ./tools/search/run_int64_snappy_page_stats.py --help
 python3 ./tools/search/extract_fastlanes_page_stats.py --help
 ```
 
-### tools/search/plot_int64_fastlanes_page_stats.R
+#### tools/search/plot_int64_fastlanes_page_stats.R
 - Effect: produces human-facing plots + markdown report from case/page CSVs
 - Input: `case_summary.csv`, `page_stats_int64_fastlanes.csv`
 - Output: plot PNGs + report markdown (recommended in `01_human/r_report`)
@@ -105,7 +153,7 @@ python3 ./tools/search/extract_fastlanes_page_stats.py --help
 Rscript ./tools/search/plot_int64_fastlanes_page_stats.R --help
 ```
 
-### tools/roundtrip/parquet_io_roundtrip_check.py
+#### tools/roundtrip/parquet_io_roundtrip_check.py
 - Effect: chunked C++ or cudf roundtrip conversion and validation
 - Input: parquet file (+ compare target in compare mode)
 - Output: converted parquet, validator result, optional C++ logs
@@ -117,7 +165,7 @@ Rscript ./tools/search/plot_int64_fastlanes_page_stats.R --help
 python3 ./tools/roundtrip/parquet_io_roundtrip_check.py --help
 ```
 
-### tools/roundtrip/verify_compression_roundtrip.py
+#### tools/roundtrip/verify_compression_roundtrip.py
 - Effect: tests codec roundtrip behavior and validates data integrity
 - Input: parquet file + optional codec/config flags
 - Output: timestamped comparison logs and summary tables
@@ -126,15 +174,15 @@ python3 ./tools/roundtrip/parquet_io_roundtrip_check.py --help
 python3 ./tools/roundtrip/verify_compression_roundtrip.py --help
 ```
 
-### tools/roundtrip/compare_parquet_duckdb.sh
+#### tools/roundtrip/compare_parquet_duckdb.sh
 - Effect: compares two parquet files with DuckDB `EXCEPT` logic
 - Output: row-count and symmetric-difference verdict
 
-### tools/roundtrip/compare_parquet_pyarrow.sh
+#### tools/roundtrip/compare_parquet_pyarrow.sh
 - Effect: compares two parquet files with PyArrow/Pandas merge diff
 - Output: schema + row-difference verdict
 
-## Recommended End-to-End INT64 Workflow
+### Recommended End-to-End INT64 Workflow
 
 Run from `cpp/examples/parquet_io`:
 
@@ -154,7 +202,7 @@ Rscript ./tools/search/plot_int64_fastlanes_page_stats.R \
   --output-dir ${PARQUET_IO_SHARED_ROOT}/artifacts/$(basename ${CUDF_HOME})/fastlanes/snappy_int64_page_stats/run_<id>/01_human/r_report
 ```
 
-## Authoring Rules
+### Authoring Rules
 
 If you add a new script or generated artifact flow, follow
 `docs/PROJECT_STRUCTURE_RULES.md`.
