@@ -44,19 +44,43 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 try:
     import pyarrow.parquet as pq
 except ImportError as exc:  # pragma: no cover
-    raise SystemExit("PyArrow is required. Activate the rapids conda env first.") from exc
+    raise SystemExit(
+        "PyArrow is required. Activate the rapids conda env first."
+    ) from exc
 
-TABLES = ["lineitem", "orders", "partsupp", "part", "customer", "supplier", "nation", "region"]
-STANDARD_ENCODINGS = ["PLAIN", "DICTIONARY", "DELTA_BINARY_PACKED", "BYTE_STREAM_SPLIT"]
-SWEEP_ENCODINGS = STANDARD_ENCODINGS + ["FASTLANES"]
+TABLES = [
+    "lineitem",
+    "orders",
+    "partsupp",
+    "part",
+    "customer",
+    "supplier",
+    "nation",
+    "region",
+]
+STANDARD_ENCODINGS = [
+    "PLAIN",
+    "DICTIONARY",
+    "DELTA_BINARY_PACKED",
+    "BYTE_STREAM_SPLIT",
+]
+SWEEP_ENCODINGS = [*STANDARD_ENCODINGS, "FASTLANES"]
 SWEEP_CODECS = ["NONE", "SNAPPY", "ZSTD"]
 TABLE_CODECS = ["SNAPPY", "ZSTD"]
-PLANS = ["cudf-default", "best-standard", "fastlanes-all", "best-with-fastlanes"]
+PLANS = [
+    "cudf-default",
+    "best-standard",
+    "fastlanes-all",
+    "best-with-fastlanes",
+]
 ROW_GROUP_ROWS = 122_880
 # Pages are built from whole page fragments, so the fragment size equals the page size: every page
 # holds exactly 20 FastLanes vectors and every row group exactly 6 pages.
@@ -85,7 +109,11 @@ class ColumnInfo:
         if self.physical == "INT64":
             if "Decimal" in logical or self.converted == "DECIMAL":
                 return None
-            if logical in {"None", ""} and self.converted in {"NONE", "INT_64", "UINT_64"}:
+            if logical in {"None", ""} and self.converted in {
+                "NONE",
+                "INT_64",
+                "UINT_64",
+            }:
                 return "INT64"
             return "INT64" if "Int(bitWidth=64" in logical else None
         if self.physical == "INT32":
@@ -108,26 +136,37 @@ class ColumnInfo:
 
     @property
     def fastlanes_encoding(self) -> str:
-        return "FASTLANES_DELTA_BINARY" if self.fastlanes_kind == "INT64" else "FASTLANE_BITPACK_RAW"
+        return (
+            "FASTLANES_DELTA_BINARY"
+            if self.fastlanes_kind == "INT64"
+            else "FASTLANE_BITPACK_RAW"
+        )
 
 
-def load_schema(path: Path) -> List[ColumnInfo]:
+def load_schema(path: Path) -> list[ColumnInfo]:
     schema = pq.ParquetFile(str(path)).schema
     cols = []
     for i in range(len(schema)):
         c = schema.column(i)
-        cols.append(ColumnInfo(c.name, str(c.physical_type), str(c.logical_type), str(c.converted_type)))
+        cols.append(
+            ColumnInfo(
+                c.name,
+                str(c.physical_type),
+                str(c.logical_type),
+                str(c.converted_type),
+            )
+        )
     return cols
 
 
-def read_csv(path: Path) -> List[Dict[str, str]]:
+def read_csv(path: Path) -> list[dict[str, str]]:
     if not path.exists() or path.stat().st_size == 0:
         return []
     with path.open(newline="") as f:
         return list(csv.DictReader(f))
 
 
-def append_csv(path: Path, row: Dict[str, object]) -> None:
+def append_csv(path: Path, row: dict[str, object]) -> None:
     new_file = not path.exists() or path.stat().st_size == 0
     with path.open("a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(row.keys()))
@@ -136,15 +175,19 @@ def append_csv(path: Path, row: Dict[str, object]) -> None:
         writer.writerow(row)
 
 
-def dedupe(rows: Iterable[Dict[str, str]], keys: Tuple[str, ...]) -> List[Dict[str, str]]:
+def dedupe(
+    rows: Iterable[dict[str, str]], keys: tuple[str, ...]
+) -> list[dict[str, str]]:
     """Keep the last row for each key, preserving first-seen order."""
-    latest: Dict[Tuple[str, ...], Dict[str, str]] = {}
+    latest: dict[tuple[str, ...], dict[str, str]] = {}
     for r in rows:
         latest[tuple(r[k] for k in keys)] = r
     return list(latest.values())
 
 
-def run(cmd: List[str], log_path: Path, timeout_s: Optional[float] = None) -> int:
+def run(
+    cmd: list[str], log_path: Path, timeout_s: Optional[float] = None
+) -> int:
     """Run `cmd` appending its output to `log_path`; returns -9 if it exceeds `timeout_s`."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a") as log:
@@ -152,7 +195,12 @@ def run(cmd: List[str], log_path: Path, timeout_s: Optional[float] = None) -> in
         log.flush()
         try:
             proc = subprocess.run(
-                cmd, stdout=log, stderr=subprocess.STDOUT, text=True, check=False, timeout=timeout_s
+                cmd,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+                timeout=timeout_s,
             )
         except subprocess.TimeoutExpired:
             log.write(f"\n[driver] killed after exceeding {timeout_s:.0f} s\n")
@@ -160,25 +208,39 @@ def run(cmd: List[str], log_path: Path, timeout_s: Optional[float] = None) -> in
     return proc.returncode
 
 
-def is_ok(row: Dict[str, str]) -> bool:
-    return row["error"] == "" and row["validated"] == "1" and row["unexpected_pages"] == "0"
+def is_ok(row: dict[str, str]) -> bool:
+    return (
+        row["error"] == ""
+        and row["validated"] == "1"
+        and row["unexpected_pages"] == "0"
+    )
 
 
-def sweep_winners(rows: List[Dict[str, str]]) -> Dict[Tuple[str, str, str], Dict[str, Optional[Dict[str, str]]]]:
-    grouped: Dict[Tuple[str, str, str], List[Dict[str, str]]] = {}
+def sweep_winners(
+    rows: list[dict[str, str]],
+) -> dict[tuple[str, str, str], dict[str, Optional[dict[str, str]]]]:
+    grouped: dict[tuple[str, str, str], list[dict[str, str]]] = {}
     for r in rows:
-        grouped.setdefault((r["table"], r["column"], r["compression"]), []).append(r)
+        grouped.setdefault(
+            (r["table"], r["column"], r["compression"]), []
+        ).append(r)
 
     winners = {}
     for key, cands in grouped.items():
         ok = [r for r in cands if is_ok(r)]
         standard = [r for r in ok if r["requested"] in STANDARD_ENCODINGS]
         fastlanes = [r for r in ok if r["requested"] == "FASTLANES"]
-        best_std = min(standard, key=lambda r: int(r["bytes"])) if standard else None
+        best_std = (
+            min(standard, key=lambda r: int(r["bytes"])) if standard else None
+        )
         fl = fastlanes[0] if fastlanes else None
         pool = [r for r in (best_std, fl) if r is not None]
         best_all = min(pool, key=lambda r: int(r["bytes"])) if pool else None
-        winners[key] = {"best_standard": best_std, "fastlanes": fl, "best_overall": best_all}
+        winners[key] = {
+            "best_standard": best_std,
+            "fastlanes": fl,
+            "best_overall": best_all,
+        }
     return winners
 
 
@@ -186,9 +248,9 @@ def plan_map(
     plan: str,
     table: str,
     codec: str,
-    columns: List[ColumnInfo],
-    winners: Dict[Tuple[str, str, str], Dict[str, Optional[Dict[str, str]]]],
-) -> Dict[str, str]:
+    columns: list[ColumnInfo],
+    winners: dict[tuple[str, str, str], dict[str, Optional[dict[str, str]]]],
+) -> dict[str, str]:
     mapping = {}
     for c in columns:
         enc = "DEFAULT"
@@ -205,9 +267,11 @@ def plan_map(
 
 
 def capture_environment(args: argparse.Namespace, machine_dir: Path) -> None:
-    def sh(cmd: List[str]) -> str:
+    def sh(cmd: list[str]) -> str:
         try:
-            return subprocess.run(cmd, capture_output=True, text=True, check=False).stdout.strip()
+            return subprocess.run(
+                cmd, capture_output=True, text=True, check=False
+            ).stdout.strip()
         except OSError:
             return ""
 
@@ -215,12 +279,24 @@ def capture_environment(args: argparse.Namespace, machine_dir: Path) -> None:
     env = {
         "captured_at": dt.datetime.now().isoformat(timespec="seconds"),
         "host": platform.node(),
-        "gpu": sh(["nvidia-smi", "--query-gpu=name,driver_version,memory.total,compute_cap", "--format=csv,noheader"]),
+        "gpu": sh(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,driver_version,memory.total,compute_cap",
+                "--format=csv,noheader",
+            ]
+        ),
         "nvcc": sh(["nvcc", "--version"]).splitlines()[-1:] or [""],
-        "cudf_version": (repo / "VERSION").read_text().strip() if (repo / "VERSION").exists() else "",
+        "cudf_version": (repo / "VERSION").read_text().strip()
+        if (repo / "VERSION").exists()
+        else "",
         "git_commit": sh(["git", "-C", str(repo), "rev-parse", "HEAD"]),
-        "git_branch": sh(["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"]),
-        "cpu": sh(["bash", "-c", "grep -m1 'model name' /proc/cpuinfo | cut -d: -f2"]).strip(),
+        "git_branch": sh(
+            ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"]
+        ),
+        "cpu": sh(
+            ["bash", "-c", "grep -m1 'model name' /proc/cpuinfo | cut -d: -f2"]
+        ).strip(),
         "cpus": sh(["nproc"]),
         "row_group_rows": ROW_GROUP_ROWS,
         "page_rows": PAGE_ROWS,
@@ -230,7 +306,9 @@ def capture_environment(args: argparse.Namespace, machine_dir: Path) -> None:
     }
     env["nvcc"] = env["nvcc"][0]
     machine_dir.mkdir(parents=True, exist_ok=True)
-    (machine_dir / "environment.json").write_text(json.dumps(env, indent=2) + "\n")
+    (machine_dir / "environment.json").write_text(
+        json.dumps(env, indent=2) + "\n"
+    )
 
 
 def step_sweep(args: argparse.Namespace, raw: Path) -> None:
@@ -276,7 +354,7 @@ def step_sweep(args: argparse.Namespace, raw: Path) -> None:
                     break
 
 
-def parse_rewrite_log(log_path: Path) -> Tuple[float, bool]:
+def parse_rewrite_log(log_path: Path) -> tuple[float, bool]:
     text = log_path.read_text(errors="replace") if log_path.exists() else ""
     m = re.search(r"Total time:\s+([\d.]+) ms", text)
     return (float(m.group(1)) if m else -1.0), ("=== SUCCESS ===" in text)
@@ -285,8 +363,15 @@ def parse_rewrite_log(log_path: Path) -> Tuple[float, bool]:
 def step_tables(args: argparse.Namespace, raw: Path) -> None:
     tables_csv = raw / "tables.csv"
     reads_csv = raw / "reads.csv"
-    done = {(r["table"], r["plan"], r["compression"]) for r in read_csv(tables_csv)}
-    winners = sweep_winners(dedupe(read_csv(raw / "sweep.csv"), ("table", "column", "requested", "compression")))
+    done = {
+        (r["table"], r["plan"], r["compression"]) for r in read_csv(tables_csv)
+    }
+    winners = sweep_winners(
+        dedupe(
+            read_csv(raw / "sweep.csv"),
+            ("table", "column", "requested", "compression"),
+        )
+    )
     scratch = args.scratch_dir
     scratch.mkdir(parents=True, exist_ok=True)
 
@@ -294,26 +379,42 @@ def step_tables(args: argparse.Namespace, raw: Path) -> None:
         path = args.data_dir / f"{table}.parquet"
         columns = load_schema(path)
         for codec in TABLE_CODECS:
-            seen_specs: Dict[str, str] = {}
+            seen_specs: dict[str, str] = {}
             for plan in PLANS:
                 mapping = plan_map(plan, table, codec, columns, winners)
                 spec = ",".join(f"{c.name}:{mapping[c.name]}" for c in columns)
                 if (table, plan, codec) in done:
                     seen_specs.setdefault(spec, plan)
                     continue
-                uses_fastlanes = any(v.startswith("FASTLANE") for v in mapping.values())
-                eligible_map = ";".join(f"{c.name}={mapping[c.name]}" for c in columns if c.fastlanes_kind)
+                uses_fastlanes = any(
+                    v.startswith("FASTLANE") for v in mapping.values()
+                )
+                eligible_map = ";".join(
+                    f"{c.name}={mapping[c.name]}"
+                    for c in columns
+                    if c.fastlanes_kind
+                )
 
                 if spec in seen_specs:
                     prior = next(
                         r
                         for r in read_csv(tables_csv)
-                        if (r["table"], r["plan"], r["compression"]) == (table, seen_specs[spec], codec)
+                        if (r["table"], r["plan"], r["compression"])
+                        == (table, seen_specs[spec], codec)
                     )
                     row = dict(prior)
-                    row.update({"plan": plan, "same_as": seen_specs[spec], "eligible_map": eligible_map})
+                    row.update(
+                        {
+                            "plan": plan,
+                            "same_as": seen_specs[spec],
+                            "eligible_map": eligible_map,
+                        }
+                    )
                     append_csv(tables_csv, row)
-                    print(f"[tables] {table}/{plan}/{codec}: identical to {seen_specs[spec]}", flush=True)
+                    print(
+                        f"[tables] {table}/{plan}/{codec}: identical to {seen_specs[spec]}",
+                        flush=True,
+                    )
                     continue
 
                 out = scratch / f"{table}_{plan}_{codec}.parquet"
@@ -336,7 +437,11 @@ def step_tables(args: argparse.Namespace, raw: Path) -> None:
                     cmd.append("--skip-validation")
                 # parquet_io_chunk has no watchdog, so bound it by input size.
                 timeout_s = 300 + 120 * path.stat().st_size / 1e9
-                rc = run(cmd, raw / "logs" / f"table_{table}_{plan}_{codec}.stdout", timeout_s)
+                rc = run(
+                    cmd,
+                    raw / "logs" / f"table_{table}_{plan}_{codec}.stdout",
+                    timeout_s,
+                )
                 rewrite_ms, success = parse_rewrite_log(log)
                 out_bytes = out.stat().st_size if out.exists() else -1
 
@@ -364,7 +469,9 @@ def step_tables(args: argparse.Namespace, raw: Path) -> None:
                         "compression": codec,
                         "output_bytes": out_bytes,
                         "rewrite_ms": rewrite_ms,
-                        "validated": (1 if success else 0) if uses_fastlanes else -1,
+                        "validated": (1 if success else 0)
+                        if uses_fastlanes
+                        else -1,
                         "return_code": rc,
                         "uses_fastlanes": int(uses_fastlanes),
                         "same_as": "",
@@ -383,8 +490,16 @@ def step_tables(args: argparse.Namespace, raw: Path) -> None:
 
 def step_ablation(args: argparse.Namespace, raw: Path) -> None:
     abl_csv = raw / "ablation.csv"
-    winners = sweep_winners(dedupe(read_csv(raw / "sweep.csv"), ("table", "column", "requested", "compression")))
-    done = {(r["table"], r["column"], r["page_rows"], r["fragment_rows"]) for r in read_csv(abl_csv)}
+    winners = sweep_winners(
+        dedupe(
+            read_csv(raw / "sweep.csv"),
+            ("table", "column", "requested", "compression"),
+        )
+    )
+    done = {
+        (r["table"], r["column"], r["page_rows"], r["fragment_rows"])
+        for r in read_csv(abl_csv)
+    }
     for table, col in ABLATION_COLUMNS:
         best = (winners.get((table, col, "SNAPPY")) or {}).get("best_standard")
         encodings = ["FASTLANES"] + ([best["requested"]] if best else [])
@@ -408,7 +523,9 @@ def step_ablation(args: argparse.Namespace, raw: Path) -> None:
                     f"--fragment-rows={fragment_rows}",
                     f"--hang-timeout-s={args.hang_timeout}",
                 ],
-                raw / "logs" / f"ablation_{table}_{col}_{page_rows}_{fragment_rows}.log",
+                raw
+                / "logs"
+                / f"ablation_{table}_{col}_{page_rows}_{fragment_rows}.log",
             )
             print(
                 f"[ablation] {table}.{col} page_rows={page_rows} fragment_rows={fragment_rows}: rc={rc}",
@@ -425,16 +542,28 @@ def fmt_bytes(n: float) -> str:
 
 
 def step_summarize(args: argparse.Namespace, run_dir: Path) -> None:
-    raw, machine, human = run_dir / "03_raw", run_dir / "02_machine", run_dir / "01_human"
+    raw, machine, human = (
+        run_dir / "03_raw",
+        run_dir / "02_machine",
+        run_dir / "01_human",
+    )
     machine.mkdir(parents=True, exist_ok=True)
     human.mkdir(parents=True, exist_ok=True)
 
-    sweep = dedupe(read_csv(raw / "sweep.csv"), ("table", "column", "requested", "compression"))
+    sweep = dedupe(
+        read_csv(raw / "sweep.csv"),
+        ("table", "column", "requested", "compression"),
+    )
     winners = sweep_winners(sweep)
-    tables = dedupe(read_csv(raw / "tables.csv"), ("table", "plan", "compression"))
-    reads = {r["label"]: r for r in dedupe(read_csv(raw / "reads.csv"), ("label",))}
+    tables = dedupe(
+        read_csv(raw / "tables.csv"), ("table", "plan", "compression")
+    )
+    reads = {
+        r["label"]: r for r in dedupe(read_csv(raw / "reads.csv"), ("label",))
+    }
     ablation = dedupe(
-        read_csv(raw / "ablation.csv"), ("table", "column", "requested", "page_rows", "fragment_rows")
+        read_csv(raw / "ablation.csv"),
+        ("table", "column", "requested", "page_rows", "fragment_rows"),
     )
     env_path = machine / "environment.json"
     env = json.loads(env_path.read_text()) if env_path.exists() else {}
@@ -453,20 +582,27 @@ def step_summarize(args: argparse.Namespace, run_dir: Path) -> None:
                 "fastlanes": fl["resolved"] if fl else "",
                 "fastlanes_bytes": int(fl["bytes"]) if fl else None,
                 "fastlanes_vs_best_standard_pct": (
-                    100.0 * (int(fl["bytes"]) - int(std["bytes"])) / int(std["bytes"]) if std and fl else None
+                    100.0
+                    * (int(fl["bytes"]) - int(std["bytes"]))
+                    / int(std["bytes"])
+                    if std and fl
+                    else None
                 ),
                 "winner": best["resolved"] if best else "",
             }
         )
 
     for r in tables:
-        read = reads.get(f"{r['table']}/{r['same_as'] or r['plan']}/{r['compression']}")
+        read = reads.get(
+            f"{r['table']}/{r['same_as'] or r['plan']}/{r['compression']}"
+        )
         r["read_ms"] = float(read["read_ms_median"]) if read else None
 
-    totals: Dict[str, Dict[str, Dict[str, float]]] = {}
+    totals: dict[str, dict[str, dict[str, float]]] = {}
     for r in tables:
         t = totals.setdefault(r["compression"], {}).setdefault(
-            r["plan"], {"bytes": 0, "rewrite_ms": 0.0, "read_ms": 0.0, "tables": 0}
+            r["plan"],
+            {"bytes": 0, "rewrite_ms": 0.0, "read_ms": 0.0, "tables": 0},
         )
         t["bytes"] += int(r["output_bytes"])
         t["rewrite_ms"] += float(r["rewrite_ms"])
@@ -485,8 +621,18 @@ def step_summarize(args: argparse.Namespace, run_dir: Path) -> None:
 
     lines = ["# TPC-H SF100 FastLanes benchmark summary", ""]
     if env:
-        lines += [f"- GPU: {env.get('gpu', '')}", f"- CUDA: {env.get('nvcc', '')}", f"- cuDF commit: {env.get('git_commit', '')}", ""]
-    lines += ["## Per-column winners", "", "| table | column | codec | best standard | bytes | FastLanes bytes | FastLanes vs best | winner |", "|---|---|---|---|---:|---:|---:|---|"]
+        lines += [
+            f"- GPU: {env.get('gpu', '')}",
+            f"- CUDA: {env.get('nvcc', '')}",
+            f"- cuDF commit: {env.get('git_commit', '')}",
+            "",
+        ]
+    lines += [
+        "## Per-column winners",
+        "",
+        "| table | column | codec | best standard | bytes | FastLanes bytes | FastLanes vs best | winner |",
+        "|---|---|---|---|---:|---:|---:|---|",
+    ]
     for w in winner_rows:
         pct = w["fastlanes_vs_best_standard_pct"]
         lines.append(
@@ -494,7 +640,13 @@ def step_summarize(args: argparse.Namespace, run_dir: Path) -> None:
             f"{fmt_bytes(w['best_standard_bytes'] or 0)} | {fmt_bytes(w['fastlanes_bytes'] or 0)} | "
             f"{'' if pct is None else f'{pct:+.2f}%'} | {w['winner']} |"
         )
-    lines += ["", "## Full-table plan totals", "", "| codec | plan | total size | rewrite time (s) | read time (s) |", "|---|---|---:|---:|---:|"]
+    lines += [
+        "",
+        "## Full-table plan totals",
+        "",
+        "| codec | plan | total size | rewrite time (s) | read time (s) |",
+        "|---|---|---:|---:|---:|",
+    ]
     for codec, plans in totals.items():
         for plan in PLANS:
             if plan in plans:
@@ -503,30 +655,67 @@ def step_summarize(args: argparse.Namespace, run_dir: Path) -> None:
                     f"| {codec} | {plan} | {fmt_bytes(t['bytes'])} | {t['rewrite_ms'] / 1e3:.1f} | {t['read_ms'] / 1e3:.1f} |"
                 )
     (human / "summary.md").write_text("\n".join(lines) + "\n")
-    print(f"[summarize] wrote {machine / 'summary.json'} and {human / 'summary.md'}", flush=True)
+    print(
+        f"[summarize] wrote {machine / 'summary.json'} and {human / 'summary.md'}",
+        flush=True,
+    )
 
 
 def main() -> int:
     today = dt.date.today().strftime("%Y%m%d")
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--data-dir", type=Path, default=Path("artifacts/tpch100/sf100"))
-    p.add_argument("--run-dir", type=Path, default=Path(f"artifacts/fastlanes_bench_sf100_{today}"))
-    p.add_argument("--scratch-dir", type=Path, default=None, help="Full-table outputs (default: <run-dir>/03_raw/cases)")
-    p.add_argument("--bench-bin", type=Path, default=Path("build/fastlanes_encoding_bench"))
-    p.add_argument("--chunk-bin", type=Path, default=Path("build/parquet_io_chunk"))
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "--data-dir", type=Path, default=Path("artifacts/tpch100/sf100")
+    )
+    p.add_argument(
+        "--run-dir",
+        type=Path,
+        default=Path(f"artifacts/fastlanes_bench_sf100_{today}"),
+    )
+    p.add_argument(
+        "--scratch-dir",
+        type=Path,
+        default=None,
+        help="Full-table outputs (default: <run-dir>/03_raw/cases)",
+    )
+    p.add_argument(
+        "--bench-bin",
+        type=Path,
+        default=Path("build/fastlanes_encoding_bench"),
+    )
+    p.add_argument(
+        "--chunk-bin", type=Path, default=Path("build/parquet_io_chunk")
+    )
     p.add_argument("--tables", default=",".join(TABLES))
     p.add_argument("--steps", default="sweep,tables,ablation,summarize")
     p.add_argument("--warmup", type=int, default=1)
     p.add_argument("--repeats", type=int, default=3)
-    p.add_argument("--batch-size", type=int, default=64, help="parquet_io_chunk --batch-size")
-    p.add_argument("--rgs-per-read", type=int, default=64, help="parquet_io_chunk --rgs-per-read")
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=64,
+        help="parquet_io_chunk --batch-size",
+    )
+    p.add_argument(
+        "--rgs-per-read",
+        type=int,
+        default=64,
+        help="parquet_io_chunk --rgs-per-read",
+    )
     p.add_argument(
         "--hang-timeout",
         type=int,
         default=600,
         help="fastlanes_encoding_bench --hang-timeout-s: longest single write/read before it is recorded as hung",
     )
-    p.add_argument("--keep-outputs", action="store_true", help="Keep full-table output files")
+    p.add_argument(
+        "--keep-outputs",
+        action="store_true",
+        help="Keep full-table output files",
+    )
     args = p.parse_args()
 
     args.tables = [t for t in args.tables.split(",") if t]
