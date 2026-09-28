@@ -346,6 +346,13 @@ python tools/bench/run_tpch_sf100_fastlanes_bench.py \
 在这台机器上完整跑一遍用了 33 分钟。驱动脚本能从中断的地方继续逐列测试；遇到卡住的情况（比如上面的 nvCOMP
 问题）会记一条错误结果，而不是一直等下去。
 
+本文的表格可以从 `03_raw/` 下的 CSV 重新生成，加 `--canvas-ts` 则输出 Canvas 用的数据：
+
+```bash
+python tools/bench/fastlanes_bench_tables.py artifacts/fastlanes_bench_sf100_20260927 > tables.md
+python tools/bench/fastlanes_bench_tables.py artifacts/fastlanes_bench_sf100_20260927 --canvas-ts
+```
+
 ## 附录 A. 各编码的每值 bit 数
 
 每行最小的值加粗。`n/a`：请求的是 DICTIONARY，但 cuDF 实际写的是 DELTA_BINARY_PACKED（见 3.7 节）。
