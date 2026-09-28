@@ -51,6 +51,10 @@ It may be sped up by configuring the proper `PARALLEL_LEVEL` number.
 This directory also contains C++ parquet examples plus helper tooling for validation,
 encoding search, and FastLanes page-level analysis.
 
+For the TPC-H SF100 benchmark (`tools/bench/`), its reports, and step-by-step instructions
+for building and running everything on another machine, see
+[docs/fastlanes/README.md](docs/fastlanes/README.md) (in Chinese).
+
 The goal of this section is to make each script easy to understand:
 - what it expects as input
 - what it does

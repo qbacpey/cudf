@@ -333,18 +333,20 @@ DELTA_BINARY_PACKED（V1 下是 PLAIN），而且不给任何警告。benchmark 
 
 ## 5. 复现
 
-在 devcontainer 里用 RAPIDS wrapper 构建 libcudf，用 `cpp/examples/build.sh` 构建示例，并把 8 张表放到
+完整步骤（环境、编译、数据准备、各输出文件的含义）见同目录的 [README.md](README.md)。简单说：在 devcontainer
+里用 RAPIDS wrapper 构建 libcudf，用 `cpp/examples/build.sh` 构建示例，把 8 张表放到
 `cpp/examples/parquet_io/artifacts/tpch100/sf100/` 之后运行：
 
 ```bash
 cd cpp/examples/parquet_io
 python tools/bench/run_tpch_sf100_fastlanes_bench.py \
   --run-dir artifacts/fastlanes_bench_sf100_20260927 \
-  --steps sweep,tables,ablation,summarize
+  --steps sweep,sweep_default,tables,ablation,summarize
 ```
 
-在这台机器上完整跑一遍用了 33 分钟。驱动脚本能从中断的地方继续逐列测试；遇到卡住的情况（比如上面的 nvCOMP
-问题）会记一条错误结果，而不是一直等下去。
+`sweep_default` 用 cuDF 默认的 page fragment 再跑一遍逐列测试，给 3.6 节的布局对比用。这台机器上
+sweep、tables、ablation、summarize 一共用了 33 分钟，sweep_default 另外约 15 分钟。驱动脚本能从中断的地方
+继续；遇到卡住的情况（比如上面的 nvCOMP 问题）会记一条错误结果，而不是一直等下去。
 
 本文的表格可以从 `03_raw/` 下的 CSV 重新生成，加 `--canvas-ts` 则输出 Canvas 用的数据：
 

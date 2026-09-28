@@ -5,7 +5,8 @@
 [FASTLANES_TPCH_SF100_BENCHMARK_2026-09-27.md](FASTLANES_TPCH_SF100_BENCHMARK_2026-09-27.md)。
 本文取代 [FASTLANES_INTEGRATION_REPORT_2026-03-28.md](FASTLANES_INTEGRATION_REPORT_2026-03-28.md)，
 旧文档描述的是 INT64 早期的 split-32 布局（现在对应已废弃的 `FASTLANE_BITPACK_SPLIT64`）。
-对应的 Cursor Canvas 源文件在 `canvas/fastlanes-cudf-integration.canvas.tsx`。
+对应的 Cursor Canvas 源文件在 `canvas/fastlanes-cudf-integration.canvas.tsx`。在另一台机器上编译、测试和复现
+benchmark 的步骤见同目录的 [README.md](README.md)。
 
 ## 1. 概要
 
