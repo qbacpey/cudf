@@ -112,8 +112,41 @@ class Run:
         self.ablation = load(raw / "ablation.csv")
         if not self.sweep:
             sys.exit(f"no sweep results in {raw}")
-        self.columns = list(dict.fromkeys((t, c) for t, c, _, _ in self.sweep))
-        self.large = [tc for tc in self.columns if self.rows(*tc) >= MIN_ROWS]
+        self.meta = {}
+        for (t, c, _, _), r in self.sweep.items():
+            self.meta.setdefault((t, c), r)
+        self.columns = list(self.meta)
+        # Per-column tables need FastLanes and one standard encoding per codec;
+        # the totals need every encoding except DICTIONARY in every codec.
+        self.complete = [
+            (t, c)
+            for t, c in self.columns
+            if all(
+                ok(self.row(t, c, codec, "FASTLANES"))
+                and any(ok(self.row(t, c, codec, e)) for e in STD)
+                for codec in CODECS
+            )
+        ]
+        self.large = [
+            (t, c)
+            for t, c in self.complete
+            if self.rows(t, c) >= MIN_ROWS
+            and all(
+                ok(self.row(t, c, codec, e))
+                for codec in CODECS
+                for e in ENC
+                if e != "DICTIONARY"
+            )
+        ]
+        self.table_names = [
+            t
+            for t in TABLES
+            if all(
+                (t, codec, p) in self.tables
+                for codec in TABLE_CODECS
+                for p in PLANS
+            )
+        ]
 
     @staticmethod
     def _key(r):
@@ -135,10 +168,10 @@ class Run:
         return min(cand, key=lambda er: int(er[1]["bytes"]))
 
     def rows(self, t, c):
-        return int(self.sweep[(t, c, "NONE", "FASTLANES")]["rows"])
+        return int(self.meta[(t, c)]["rows"])
 
     def type(self, t, c):
-        return TYPE[self.sweep[(t, c, "NONE", "FASTLANES")]["type"]]
+        return TYPE[self.meta[(t, c)]["type"]]
 
     def aggregate(self, codec):
         """Totals over the large columns: fixed encodings, then the per-column best choices."""
@@ -158,8 +191,6 @@ class Run:
             )
         )
         for label, rows in choices:
-            if not all(ok(r) for r in rows):
-                sys.exit(f"{codec}/{label}: missing or invalid sweep rows")
             raw_bytes = sum(int(r["raw_bytes"]) for r in rows)
             out_bytes = sum(int(r["bytes"]) for r in rows)
             out.append(
@@ -210,9 +241,34 @@ def print_markdown(run):
         f"逐列测试：{len(sweep)} 个结果，{sum(1 for r in sweep if r['error'])} 个错误，"
         f"{sum(1 for r in sweep if r['validated'] == '1')} 个校验通过，{fallbacks} 个 page 编码和请求不一致。\n"
     )
+    skipped = [tc for tc in run.columns if tc not in run.complete]
+    if skipped:
+        print(
+            "缺少有效的 FastLanes 或标准编码结果、没有列入逐列表格的列："
+            + "、".join(f"`{t}.{c}`" for t, c in skipped)
+            + "\n"
+        )
+    left_out = [
+        tc
+        for tc in run.complete
+        if run.rows(*tc) >= MIN_ROWS and tc not in run.large
+    ]
+    if left_out:
+        print(
+            "有编码结果缺失或无效、没有计入汇总的列："
+            + "、".join(f"`{t}.{c}`" for t, c in left_out)
+            + "\n"
+        )
+    partial = sorted({t for t, _, _ in run.tables} - set(run.table_names))
+    if partial:
+        print(
+            "整表结果不完整、没有列入整表表格的表："
+            + "、".join(partial)
+            + "\n"
+        )
 
     winners, losers = [], []
-    for t, c in run.columns:
+    for t, c in run.complete:
         change = {
             codec: pct(
                 run.bits(t, c, codec, "FASTLANES"),
@@ -342,11 +398,13 @@ def print_markdown(run):
         "lrrrrrr",
     )
 
-    if run.tables:
+    names_t = run.table_names
+    large_t = [t for t in LARGE_TABLES if t in names_t]
+    if names_t:
         for codec in TABLE_CODECS:
             print(f"### 3.5 文件大小，{codec}\n")
             rows, total = [], dict.fromkeys(SIZE_PLANS, 0)
-            for t in TABLES:
+            for t in names_t:
                 size = {
                     p: int(run.plan_row(t, codec, p)["output_bytes"])
                     for p in SIZE_PLANS
@@ -365,7 +423,7 @@ def print_markdown(run):
                     [t] + [fmt_size(size[p]) for p in SIZE_PLANS] + [last]
                 )
             rows.append(
-                ["**8 张表合计**"]
+                [f"**{len(names_t)} 张表合计**"]
                 + [f"**{total[p] / 1e9:.3f} GB**" for p in SIZE_PLANS]
                 + [
                     f"**{fmt_pct(pct(total['best-with-fastlanes'], total['best-standard']))}**"
@@ -385,19 +443,19 @@ def print_markdown(run):
                     float(run.plan_row(t, codec, p)["rewrite_ms"]) / 1e3
                     for p in PLANS
                 ]
-                for t in TABLES
+                for t in names_t
             }
             read = {
-                t: [run.read_s(t, codec, p) for p in PLANS] for t in TABLES
+                t: [run.read_s(t, codec, p) for p in PLANS] for t in names_t
             }
             totals[codec] = (
                 [
-                    sum(rewrite[t][i] for t in TABLES)
+                    sum(rewrite[t][i] for t in names_t)
                     for i in range(len(PLANS))
                 ],
-                [sum(read[t][i] for t in TABLES) for i in range(len(PLANS))],
+                [sum(read[t][i] for t in names_t) for i in range(len(PLANS))],
             )
-            for t in LARGE_TABLES:
+            for t in large_t:
                 rows.append(
                     [
                         t,
@@ -409,7 +467,7 @@ def print_markdown(run):
         for codec, (rewrite, read) in totals.items():
             rows.append(
                 [
-                    "8 张表合计",
+                    f"{len(names_t)} 张表合计",
                     codec,
                     " / ".join(f"{x:.1f}" for x in rewrite),
                     " / ".join(f"{x:.2f}" for x in read),
@@ -420,11 +478,13 @@ def print_markdown(run):
         shares = []
         for codec in TABLE_CODECS:
             eligible = sum(
-                int(run.best(t, c, codec)[1]["bytes"]) for t, c in run.columns
+                int(run.best(t, c, codec)[1]["bytes"])
+                for t, c in run.complete
+                if t in names_t
             )
             total = sum(
                 int(run.plan_row(t, codec, "best-standard")["output_bytes"])
-                for t in TABLES
+                for t in names_t
             )
             shares.append(f"{codec} 文件的 {100 * eligible / total:.1f}%")
         print(f"适用列占 {'、'.join(shares)}（按最优标准编码计）。\n")
@@ -441,6 +501,8 @@ def print_markdown(run):
                     run.row(t, c, codec, "FASTLANES"),
                     run.row(t, c, codec, "FASTLANES", True),
                 )
+                if not ok(d):
+                    continue
                 fl.append(pct(float(a["bytes"]), float(d["bytes"])))
                 for e in STD:
                     ba, bd = (
@@ -453,6 +515,8 @@ def print_markdown(run):
                         and abs(ba - bd) > abs(std_bits[e])
                     ):
                         std_bits[e] = ba - bd
+            if not fl:
+                continue
             fl.sort()
             rows.append(
                 [
@@ -468,8 +532,12 @@ def print_markdown(run):
             "llrrrr",
         )
         flips = []
-        for t, c in run.columns:
+        for t, c in run.complete:
             for codec in CODECS:
+                if not ok(run.row(t, c, codec, "FASTLANES", True)) or not any(
+                    ok(run.row(t, c, codec, e, True)) for e in STD
+                ):
+                    continue
                 aligned = pct(
                     run.bits(t, c, codec, "FASTLANES"),
                     run.bits(t, c, codec, run.best(t, c, codec)[0]),
@@ -493,6 +561,8 @@ def print_markdown(run):
         print("### 3.6 三种布局的对比，SNAPPY\n")
         rows = []
         for r in run.ablation:
+            if not ok(r):
+                continue
             page, frag = int(r["page_rows"]), int(r["fragment_rows"] or 0)
             setting = (
                 f"{page:,} 行，fragment {frag:,} 行"
@@ -537,6 +607,8 @@ def print_markdown(run):
         rows = []
         for t, c in run.columns:
             v = {e: run.bits(t, c, codec, e) for e in ENC}
+            if all(x is None for x in v.values()):
+                continue
             smallest = min(x for x in v.values() if x is not None)
             cells = [
                 "n/a"
@@ -640,7 +712,8 @@ def print_canvas_ts(run):
         out.append("  ],")
     out.append("};\n")
 
-    if run.tables:
+    names_t = run.table_names
+    if names_t:
         out.append(
             'const PLAN_TOTALS: Record<"SNAPPY" | "ZSTD", PlanTotal[]> = {'
         )
@@ -650,18 +723,18 @@ def print_canvas_ts(run):
                 gb = (
                     sum(
                         int(run.plan_row(t, codec, p)["output_bytes"])
-                        for t in TABLES
+                        for t in names_t
                     )
                     / 1e9
                 )
                 rewrite = (
                     sum(
                         float(run.plan_row(t, codec, p)["rewrite_ms"])
-                        for t in TABLES
+                        for t in names_t
                     )
                     / 1e3
                 )
-                read = sum(run.read_s(t, codec, p) for t in TABLES)
+                read = sum(run.read_s(t, codec, p) for t in names_t)
                 out.append(
                     f'    {{ plan: "{p}", gb: {gb:.3f}, rewriteS: {rewrite:.1f}, readS: {read:.2f} }},'
                 )
@@ -670,7 +743,7 @@ def print_canvas_ts(run):
 
         out.append("const TABLE_ROWS: TableRow[] = [")
         for codec in TABLE_CODECS:
-            for t in LARGE_TABLES:
+            for t in [t for t in LARGE_TABLES if t in names_t]:
                 cells = [
                     f"{{ mb: {int(run.plan_row(t, codec, p)['output_bytes']) / 1e6:.1f}, "
                     f"rewriteS: {float(run.plan_row(t, codec, p)['rewrite_ms']) / 1e3:.1f}, readS: {run.read_s(t, codec, p):.2f} }}"
@@ -684,6 +757,8 @@ def print_canvas_ts(run):
     if run.ablation:
         out.append("const ABLATION: AblationRow[] = [")
         for r in run.ablation:
+            if not ok(r):
+                continue
             enc = (
                 "FastLanes"
                 if r["resolved"].startswith("FASTLANE")

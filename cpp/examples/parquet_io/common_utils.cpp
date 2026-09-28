@@ -79,7 +79,8 @@ cudf::io::column_encoding get_encoding_type(std::string name)
                               " is not a valid encoding type.\n\n"
                               "Available encoding types: DEFAULT, DICTIONARY, PLAIN,\n"
                               "DELTA_BINARY_PACKED, DELTA_LENGTH_BYTE_ARRAY,\n"
-                              "DELTA_BYTE_ARRAY\n\n");
+                              "DELTA_BYTE_ARRAY, BYTE_STREAM_SPLIT, FASTLANE_BITPACK_RAW,\n"
+                              "FASTLANES_DELTA_BINARY\n\n");
 }
 
 std::string get_encoding_string(cudf::io::column_encoding encoding)

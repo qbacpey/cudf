@@ -3,10 +3,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """TPC-H FastLanes benchmark driver.
 
-Steps (select with --steps, default: all of them in this order):
+Steps (select with --steps; default: sweep,tables,ablation,summarize, run in this order):
   sweep      fastlanes_encoding_bench sweep over every FastLanes-eligible column of every table:
              PLAIN, DICTIONARY, DELTA_BINARY_PACKED, BYTE_STREAM_SPLIT and FastLanes, each with
              NONE, SNAPPY and ZSTD.
+  sweep_default
+             the same sweep with cuDF's default 5000-row page fragments (so 20000-row pages),
+             written to sweep_default_fragments.csv for the page-layout comparison. Not run by
+             default.
   tables     full-table rewrites with parquet_io_chunk for four encoding plans per codec, followed
              by warm-cache read timing with `fastlanes_encoding_bench read`.
   ablation   FastLanes vs. the best standard encoding under three page layouts: a 614-row cap on
@@ -311,8 +315,18 @@ def capture_environment(args: argparse.Namespace, machine_dir: Path) -> None:
     )
 
 
-def step_sweep(args: argparse.Namespace, raw: Path) -> None:
-    sweep_csv = raw / "sweep.csv"
+def step_sweep(
+    args: argparse.Namespace,
+    raw: Path,
+    csv_name: str = "sweep.csv",
+    fragment_rows: Optional[int] = None,
+) -> None:
+    """Sweep every eligible column; `fragment_rows` None keeps the bench default (= page rows)."""
+    sweep_csv = raw / csv_name
+    step = Path(csv_name).stem
+    extra = (
+        [] if fragment_rows is None else [f"--fragment-rows={fragment_rows}"]
+    )
     all_combos = [(e, c) for e in SWEEP_ENCODINGS for c in SWEEP_CODECS]
 
     for table in args.tables:
@@ -342,12 +356,13 @@ def step_sweep(args: argparse.Namespace, raw: Path) -> None:
                         f"--repeats={args.repeats}",
                         f"--row-group-rows={ROW_GROUP_ROWS}",
                         f"--page-rows={PAGE_ROWS}",
+                        *extra,
                         f"--hang-timeout-s={args.hang_timeout}",
                     ],
-                    raw / "logs" / f"sweep_{table}_{col}.log",
+                    raw / "logs" / f"{step}_{table}_{col}.log",
                 )
                 print(
-                    f"[sweep] {table}.{col}: {len(todo)} cases, rc={rc} {time.perf_counter() - t0:.1f}s",
+                    f"[{step}] {table}.{col}: {len(todo)} cases, rc={rc} {time.perf_counter() - t0:.1f}s",
                     flush=True,
                 )
                 if rc != 3:
@@ -718,20 +733,46 @@ def main() -> int:
     )
     args = p.parse_args()
 
+    steps = [s for s in args.steps.split(",") if s]
+    unknown = set(steps) - {
+        "sweep",
+        "sweep_default",
+        "tables",
+        "ablation",
+        "summarize",
+    }
+    if unknown:
+        p.error(f"unknown step(s): {', '.join(sorted(unknown))}")
     args.tables = [t for t in args.tables.split(",") if t]
     args.data_dir = args.data_dir.resolve()
     args.bench_bin = args.bench_bin.resolve()
     args.chunk_bin = args.chunk_bin.resolve()
+    needed: list[Path] = []
+    if set(steps) & {"sweep", "sweep_default", "tables", "ablation"}:
+        inputs = set(args.tables) | (
+            {t for t, _ in ABLATION_COLUMNS} if "ablation" in steps else set()
+        )
+        needed += [
+            args.bench_bin,
+            *(args.data_dir / f"{t}.parquet" for t in sorted(inputs)),
+        ]
+    if "tables" in steps:
+        needed.append(args.chunk_bin)
+    missing = [str(x) for x in needed if not x.exists()]
+    if missing:
+        p.error("missing input(s): " + ", ".join(missing))
+
     run_dir = args.run_dir.resolve()
     raw = run_dir / "03_raw"
     raw.mkdir(parents=True, exist_ok=True)
     args.scratch_dir = (args.scratch_dir or raw / "cases").resolve()
     capture_environment(args, run_dir / "02_machine")
 
-    steps = [s for s in args.steps.split(",") if s]
     t0 = time.perf_counter()
     if "sweep" in steps:
         step_sweep(args, raw)
+    if "sweep_default" in steps:
+        step_sweep(args, raw, "sweep_default_fragments.csv", fragment_rows=0)
     if "tables" in steps:
         step_tables(args, raw)
     if "ablation" in steps:
